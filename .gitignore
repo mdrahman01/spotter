@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Driveway sample photos (they show a real plate) and their annotated copies
+samples/
+samples_out/
