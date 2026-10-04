@@ -95,3 +95,54 @@ $0.18 at $1.59 an hour.
   the process list.
 - We did not open the docs site for this probe: the CLI help and the API
   definition were enough.
+
+## 2026-10-04 — Cosmos Reason probe, second attempt
+
+Same endpoint settings, after access to the gated model was granted on Hugging
+Face. `scripts/cosmos_up.py` now checks that access first and creates nothing
+without it.
+
+**Startup stage times**
+
+| Stage | Time |
+| --- | --- |
+| Access check and `nebius ai endpoint create --async` accepted | 10 s |
+| `PROVISIONING` | 62 s |
+| `STARTING` | 42 s |
+| `IMAGE_PULLING` | 169 s |
+| `STARTING` again | 10 s |
+| `RUNNING` until `/v1/models` returned 200 (model download and load) | 337 s |
+| Total, from create to model loaded | 630 s (10.5 min) |
+| `nebius ai endpoint delete` | 101 s |
+
+The endpoint existed for 12.4 minutes, about $0.33 at $1.59 an hour. With the
+first attempt, the probe has cost about $0.51.
+
+**What worked**
+
+- `nvidia/Cosmos-Reason2-8B` loads and serves on one L40S (`gpu-l40s-a`,
+  `1gpu-8vcpu-32gb`) with `--max-model-len 16384`. No retry with the 2B model
+  was needed.
+- Three requests with one image each (960x1280 or 1280x683 JPEG, about 900 to
+  1,260 prompt tokens) took 5.2 s, 1.3 s and 1.9 s.
+
+**Errors hit**
+
+- All three tests were scored FAIL, because every response had empty
+  `content`: the model's whole answer came back in the reasoning field. We
+  served with `--reasoning-parser qwen3` and our prompts do not ask for
+  `<think>` reasoning; the parser appears to treat output with no closing
+  `</think>` tag as reasoning. Read from that field, the model was right about
+  whether a vehicle was present in both images.
+- One of the two JSON answers was not valid JSON (a missing comma), so a strict
+  parser would have rejected it even in the right field.
+
+**Confusing in the Nebius CLI or docs**
+
+- `RUNNING` means the container has started, not that the model is serving:
+  the managed URL answered 503 for another 5.6 minutes while vLLM downloaded
+  and loaded the model. Polling `/v1/models` was the only readiness signal we
+  found.
+- The state went `STARTING`, `IMAGE_PULLING`, `STARTING`, `RUNNING`. The API
+  definition describes `STARTING -> IMAGE_PULLING -> RUNNING`, so a script that
+  reads a return to `STARTING` as a restart would be wrong.

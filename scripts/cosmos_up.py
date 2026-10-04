@@ -11,8 +11,10 @@ waits in two stages, because running is not the same as loaded:
     .venv/bin/python scripts/cosmos_up.py [--model nvidia/Cosmos-Reason2-2B]
 
 Reads HF_TOKEN from .env and saves COSMOS_TOKEN and COSMOS_URL there. Secrets
-are never printed. After 30 minutes it gives up, prints the last 100 lines of
-the endpoint's logs and exits non-zero.
+are never printed. Before creating anything it checks that HF_TOKEN can read
+the gated model (HTTP 200 on its config.json) and refuses to start otherwise.
+After 30 minutes it gives up, prints the last 100 lines of the endpoint's logs
+and exits non-zero.
 
 The endpoint is billed for as long as it exists, loaded or not: always run
 scripts/cosmos_down.py afterwards.
@@ -130,6 +132,33 @@ def models_answer(url: str, token: str) -> int | str:
         return f"{type(err).__name__}: {getattr(err, 'reason', err)}"
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect, so HF_TOKEN is only ever sent to huggingface.co."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def model_access(model: str, hf_token: str) -> int | str:
+    """HTTP status HF_TOKEN gets for the gated model's config.json, or a short error.
+
+    200 means the token can download the model. 403 means its account has not
+    been granted access to the gated repo, and vLLM would fail at start-up on
+    an endpoint that is already being billed.
+    """
+    request = urllib.request.Request(
+        f"https://huggingface.co/{model}/resolve/main/config.json",
+        headers={"Authorization": f"Bearer {hf_token}"},
+    )
+    try:
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
+            return response.status
+    except urllib.error.HTTPError as err:
+        return err.code
+    except OSError as err:  # URLError, timeouts, connection resets
+        return f"{type(err).__name__}: {getattr(err, 'reason', err)}"
+
+
 def give_up(endpoint_id: str, reason: str) -> int:
     """Report a failed start with the last 100 log lines. The endpoint still exists."""
     log(f"giving up: {reason}")
@@ -160,6 +189,14 @@ def main() -> int:
         log("HF_TOKEN is missing from .env")
         return EXIT_PREREQUISITE
     SECRETS.append(hf_token)
+    access = model_access(model, hf_token)
+    if access != 200:
+        log(
+            f"HF_TOKEN cannot read {model} (config.json -> HTTP {access}): no endpoint "
+            f"created. Request access at https://huggingface.co/{model}"
+        )
+        return EXIT_PREREQUISITE
+    log(f"HF_TOKEN can read {model} (config.json -> HTTP 200)")
     try:
         already_there = existing_endpoints()
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as err:
