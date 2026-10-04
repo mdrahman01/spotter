@@ -38,3 +38,60 @@ Dated notes on using NVIDIA Nemotron through Nebius Token Factory for Spotter.
   look like `call_...` on Lightning and `chatcmpl-tool-...` on Ultra, and
   `usage.prompt_tokens_details` is `null` on Lightning but an object on Ultra.
   Neither difference caused a problem with the OpenAI SDK.
+
+## 2026-10-04 — Week 1: Cosmos Reason probe on a Nebius L40S endpoint
+
+One attempt to serve `nvidia/Cosmos-Reason2-8B` with vLLM
+(`vllm/vllm-openai:v0.18.0-cu130`) on a Serverless AI endpoint: `gpu-l40s-a`,
+`1gpu-8vcpu-32gb`, on demand, no public IP, token auth.
+
+**Startup stage times**
+
+| Stage | Time |
+| --- | --- |
+| `nebius ai endpoint create --async` accepted | 6 s |
+| `PROVISIONING` | 63 s |
+| `STARTING` | 32 s |
+| `IMAGE_PULLING` | 178 s |
+| `RUNNING` with an https URL | reached 4 min 40 s after starting |
+| Model download and load | did not happen (see errors) |
+| `nebius ai endpoint delete` | 99 s |
+
+States were sampled every 10 s. The endpoint existed for 6.7 minutes, about
+$0.18 at $1.59 an hour.
+
+**Errors hit**
+
+- The model never loaded, for a reason that has nothing to do with Nebius or the
+  GPU: vLLM exited at start-up with a Hugging Face `GatedRepoError` (HTTP 403),
+  because the Hugging Face account behind our token had not been granted access
+  to `nvidia/Cosmos-Reason2-8B`. The same token also gets 403 for
+  `nvidia/Cosmos-Reason2-2B`, so we did not retry with the smaller model.
+- The endpoint went from `RUNNING` to `ERROR` 23 s after it started. We found
+  the cause in `nebius ai endpoint logs`.
+- So whether the 8B model fits and runs on one L40S is still unanswered, and
+  the three image tests did not run.
+
+**Confusing in the Nebius CLI or docs**
+
+- The installer puts the CLI in `~/.nebius/bin` and adds it to `PATH` in
+  `.zshrc` only, so a script or any non-interactive shell gets
+  `command not found: nebius`. Our scripts fall back to the full path.
+- `nebius ai endpoint create --help` gives example platform and preset names
+  but does not say how to list the valid ones. `--dry-run` was how we checked
+  `gpu-l40s-a` and `1gpu-8vcpu-32gb` before paying for anything.
+- The help for `get` does not describe the status fields or the possible
+  states. We read them from the public API definition (`nebius/api` on GitHub):
+  `PROVISIONING`, `STARTING`, `IMAGE_PULLING`, `RUNNING`, `STOPPING`, `STOPPED`,
+  `DELETING`, `ERROR`.
+- `nebius ai endpoint list --format json` prints `{}` when there are no
+  endpoints, not `{"items": []}`, so a script has to allow for the missing key.
+- The help marks `--parent-id` as required for `get-by-name`, while `create`
+  and `list` take it from the CLI profile. We used `list` and filtered by name
+  instead.
+- `--token` and `--env KEY=VALUE` take secrets only as command-line arguments;
+  the alternative is a MysteryBox secret. For a short probe, reading them from
+  an environment variable or a file would be simpler and would keep them out of
+  the process list.
+- We did not open the docs site for this probe: the CLI help and the API
+  definition were enough.
