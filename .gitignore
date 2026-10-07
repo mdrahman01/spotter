@@ -222,3 +222,6 @@ __marimo__/
 # Driveway sample photos (they show a real plate) and their annotated copies
 samples/
 samples_out/
+
+# Watcher output: event log and snapshots (they show real plates)
+data/
