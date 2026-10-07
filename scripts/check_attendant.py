@@ -7,6 +7,12 @@ Reads data/spotter.db: the sessions table, and the set_light and send_alert
 calls recorded in action_log. Only delivered alerts count. Prints no plate text
 and no alert messages.
 
+Wording checks: in booked and overstay no closing sentence or alert may call the
+car unbooked; in booked no alert may mention an overstay; in overstay the
+ENDING_SOON alert must contain the code's time-left words and the OVERSTAY
+driver alert the fee amount. In every scenario with a stay, left_at must equal
+the time the plate was last read.
+
 booked passes if there is exactly one session, closed, billed at least the
 minimum charge; the light went green then off; and the driver got two alerts.
 unknown passes if there are no sessions and no bill; the light went red then
@@ -24,7 +30,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spotter import config  # noqa: E402
-from spotter.db import Database  # noqa: E402
+from spotter.db import Database, parse  # noqa: E402
+from spotter.timers import time_left_words  # noqa: E402
+from spotter.tools import dollars  # noqa: E402
 
 EXPECTED_LIGHTS = {
     "booked": ["green", "off"],
@@ -45,15 +53,23 @@ def main() -> int:
     actions = db.actions()
 
     lights, alerts, undelivered, errors, model_problems, bills, order = [], [], [], [], [], [], []
+    finals, messages, left_events = [], [], []  # messages: (to, event type, event time, text)
     for action in actions:
-        event_type = json.loads(action["event"])["type"]
+        event = json.loads(action["event"])
+        event_type = event["type"]
         if event_type not in order:
             order.append(event_type)
+        if event_type == "LEFT" and event not in left_events:
+            left_events.append(event)
         result = json.loads(action["result"])
         try:
             arguments = json.loads(action["arguments"])
         except ValueError:
             arguments = {}
+        if action["tool"] == "final":
+            finals.append(result.get("text") or "")
+        if action["tool"] == "send_alert":
+            messages.append((arguments.get("to"), event_type, event["time"], arguments.get("message") or ""))
         if action["tool"] == "model":
             model_problems.append(result.get("error"))
         if "error" in result:
@@ -93,6 +109,39 @@ def main() -> int:
     failures = []
     if lights != EXPECTED_LIGHTS[scenario]:
         failures.append(f"light sequence {lights} is not {EXPECTED_LIGHTS[scenario]}")
+
+    # Wording, checked on the text without printing it.
+    texts = finals + [text for _, _, _, text in messages]
+    if scenario in ("booked", "overstay") and any("unbooked" in text.lower() for text in texts):
+        failures.append("a closing sentence or alert calls the car unbooked")
+    if scenario == "booked" and any("overstay" in text.lower() for _, _, _, text in messages):
+        failures.append("an alert mentions an overstay")
+    if scenario == "overstay" and sessions:
+        booking = db.booking(sessions[0]["booking_id"])
+        ends_at = parse(booking["ends_at"])
+        warnings = [
+            (text, time_left_words((ends_at - parse(when)).total_seconds()))
+            for to, kind, when, text in messages
+            if to == "driver" and kind == "ENDING_SOON"
+        ]
+        if not any(words in text for text, words in warnings):
+            failures.append(
+                "the ENDING_SOON alert does not contain the code's time-left words "
+                f"({[words for _, words in warnings] or 'no such alert'})"
+            )
+        fee = dollars(config.load({}).overstay_fee_cents)
+        if not any(fee in text for to, kind, _, text in messages if to == "driver" and kind == "OVERSTAY"):
+            failures.append(f"the OVERSTAY driver alert does not state the fee {fee}")
+
+    # A stay ends when the car was last seen, not when the rule noticed.
+    for s in sessions:
+        if s["status"] != "closed":
+            continue
+        last_read = next((event.get("last_read_at") for event in left_events), None)
+        if s["left_at"] != last_read:
+            failures.append(f"left_at {s['left_at']} is not the last-read time {last_read}")
+        if not s["left_snapshot"]:
+            failures.append("the session has no departure snapshot")
     if scenario == "overstay":
         if order != OVERSTAY_EVENTS:
             failures.append(f"events {order} are not {OVERSTAY_EVENTS}")

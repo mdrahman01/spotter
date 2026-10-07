@@ -8,7 +8,6 @@ alerted that the attendant is offline.
 """
 
 import json
-import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,9 +16,10 @@ from openai import OpenAI
 
 from spotter.alerts import Alert, Alerts
 from spotter.db import Database, iso, parse
-from spotter.events import Event
+from spotter.events import Event, EventFrames
 from spotter.light import Light
 from spotter.privacy import Masker
+from spotter.timers import time_left_words
 from spotter.tools import (
     DEFAULT_MIN_CHARGE_CENTS,
     DEFAULT_OVERSTAY_FEE_CENTS,
@@ -44,11 +44,11 @@ Rules:
 1. Always call lookup_booking first. Never assume a booking.
 2. ARRIVED with a booking whose status is "active": start_session, set_light green, send_alert to the driver.
 3. ARRIVED with anything else (no booking, or outside its window): set_light red, then send_alert to the owner saying that an unbooked car is in the spot and that a photo is attached. Do not suggest contacting the driver.
-4. ENDING_SOON: send_alert to the driver saying how many minutes are left (minutes_left in the event).
-5. OVERSTAY: set_light amber, send_alert to the driver that the booking has ended and an overstay fee now applies, and send_alert to the owner that the car is overstaying.
-6. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when a fee applied, then set_light off.
-7. LEFT with no open stay: send_alert to the owner that the unbooked car has gone and how long it stayed (stayed_for in the event), then set_light off.
-8. When done, reply with one short sentence and no more tool calls.
+4. ENDING_SOON: send_alert to the driver saying how much time is left, in the words of time_left in the event.
+5. OVERSTAY: set_light amber, send_alert to the driver that the booking has ended and an overstay fee of overstay_fee (in the event) now applies, and send_alert to the owner that the car is overstaying.
+6. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when the bill has an overstay fee, then set_light off.
+7. LEFT with no open stay: send_alert to the owner that the car has gone and how long it stayed (stayed_for in the event), then set_light off.
+8. When done, reply with one short sentence listing what you did, and make no more tool calls.
 """
 
 
@@ -96,27 +96,38 @@ class Attendant:
         self.overstay_fee_cents = overstay_fee_cents
         self.stats = Stats()
 
-    def handle(self, event: Event, snapshot: str, at: datetime) -> None:
+    def handle(self, event: Event, frames: EventFrames) -> None:
         """Let the model act on one event, printing everything it does."""
         self.stats.events += 1
         self.masker.for_event(event.plate)
         say = self.masker.print
-        context = EventContext(event.type, event.plate, at, snapshot, time.perf_counter())
+        at = frames.at
+        left = event.type == "LEFT"
+        context = EventContext(
+            event.type,
+            event.plate,
+            at,
+            frames.snapshot,
+            last_read_at=frames.last_read_at if left else None,
+            last_read_snapshot=frames.last_read_snapshot if left else None,
+            started=time.perf_counter(),
+        )
         toolbox = Toolbox(
             self.db, self.light, self.alerts, context, self.min_charge_cents, self.overstay_fee_cents
         )
-        payload = {
-            "event": event.type,
-            "plate": event.plate,
-            "time": iso(at),
-            "reads": event.reads,
-            "snapshot": snapshot,
-        }
-        if event.type == "LEFT":
-            payload["stayed_for"] = describe_duration(event.last_seen - event.first_seen)
+        # The model gets facts it acts on, not file paths: the code attaches snapshots.
+        payload = {"event": event.type, "plate": event.plate, "time": iso(at), "reads": event.reads}
+        logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
+        if left:
+            # The car left when it was last read, not when the rule noticed.
+            payload["last_read_at"] = iso(frames.last_read_at)
+            logged_event["last_read_at"] = iso(frames.last_read_at)
+            if self.db.open_session(event.plate) is None:
+                # Only an unbooked car's departure is described by how long it sat
+                # there; a stay's duration comes from its bill.
+                payload["stayed_for"] = describe_duration(event.last_seen - event.first_seen)
         elif event.type in ("ENDING_SOON", "OVERSTAY"):
             payload.update(self._booking_timing(event.plate, at, event.type))
-        logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
         say(f"=== {event.type} {self.masker.label(event.plate)} at {iso(at)} ===")
 
         messages = [
@@ -185,9 +196,7 @@ class Attendant:
         ends_at = parse(booking["ends_at"])
         timing = {"session_id": stay["id"], "booking_ends_at": booking["ends_at"]}
         if kind == "ENDING_SOON":
-            seconds_left = max(0.0, (ends_at - at).total_seconds())
-            timing["minutes_left"] = math.ceil(seconds_left / 60)
-            timing["seconds_left"] = round(seconds_left)
+            timing["time_left"] = time_left_words(max(0.0, (ends_at - at).total_seconds()))
         else:
             timing["ended_ago"] = describe_duration((at - ends_at).total_seconds())
             timing["overstay_fee"] = dollars(self.overstay_fee_cents)

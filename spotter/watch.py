@@ -10,7 +10,9 @@ clock (frame index / fps), so it replays as fast as the CPU allows and gives
 the same events every time. A live stream is timed by the wall clock.
 
 For each event one JSON line is appended to data/events.jsonl, the frame is
-saved under data/snapshots/, and one line is printed. With --expect PLATE the
+saved under data/snapshots/, and one line is printed. A LEFT event also saves
+the last frame in which the plate was read, since the car left at that moment,
+not when the rule noticed. With --expect PLATE the
 printed lines say MINE or OTHER instead of the plate text. spotter.run adds a
 handler that passes each event to the attendant.
 
@@ -21,8 +23,10 @@ password off the command line.
 """
 
 import argparse
+import gc
 import json
 import math
+import os
 import sys
 import time
 from collections import Counter
@@ -38,7 +42,7 @@ from dotenv import load_dotenv
 
 from spotter import config
 from spotter.config import Settings
-from spotter.events import ArriveLeaveRule, Event
+from spotter.events import ArriveLeaveRule, Event, EventFrames
 from spotter.privacy import Masker
 from spotter.reader import PlateReader, normalize, zone_box
 
@@ -51,12 +55,13 @@ SNAPSHOT_DIR = DATA_DIR / "snapshots"
 # next sample time.
 EPSILON = 1e-6
 
-EventHandler = Callable[[Event, str, datetime], None]
-"""Called with each event, its snapshot path, and its real (wall-clock) time."""
+EventHandler = Callable[[Event, EventFrames], None]
+"""Called with each event and the real times and frames behind it."""
 
-TimerCheck = Callable[[float, datetime], list[Event]]
-"""Called on every processed frame with the stream time and the real time; returns
-timer events (ENDING_SOON, OVERSTAY) to log and handle like the rule's own."""
+TimerCheck = Callable[[float, datetime, set[str]], list[Event]]
+"""Called on every processed frame with the stream time, the real time and the
+plates read in the frame; returns timer events (ENDING_SOON, OVERSTAY) to log and
+handle like the rule's own."""
 
 
 class Clock:
@@ -119,7 +124,7 @@ def save_snapshot(frame: np.ndarray, name: str) -> str:
     return str(path.relative_to(REPO_ROOT))
 
 
-def log_event(event: Event, snapshot: str, clock: Clock, masker: Masker) -> None:
+def log_event(event: Event, frames: EventFrames, clock: Clock, masker: Masker) -> None:
     """Append the event to data/events.jsonl and print one line about it."""
     record = {
         "type": event.type,
@@ -128,18 +133,21 @@ def log_event(event: Event, snapshot: str, clock: Clock, masker: Masker) -> None
         "first_seen": round(event.first_seen, 3),
         "last_seen": round(event.last_seen, 3),
         "reads": event.reads,
-        "snapshot": snapshot,
+        "snapshot": frames.snapshot,
+        "last_read_snapshot": frames.last_read_snapshot if event.type == "LEFT" else None,
     }
     DATA_DIR.mkdir(exist_ok=True)
     with EVENTS_PATH.open("a", encoding="utf-8") as events_file:
         events_file.write(json.dumps(record) + "\n")
-    print(
+    line = (
         f"{event.type:<7} {masker.label(event.plate)} | at {clock.label(event.time)}"
         f" | first seen {clock.label(event.first_seen)}"
         f" | last seen {clock.label(event.last_seen)}"
-        f" | {event.reads} reads | {snapshot}",
-        flush=True,
+        f" | {event.reads} reads | {frames.snapshot}"
     )
+    if event.type == "LEFT":
+        line += f" | last read {frames.last_read_snapshot}"
+    print(line, flush=True)
 
 
 def run(
@@ -155,8 +163,9 @@ def run(
     goes to the handler, if given, as soon as it happens, with its snapshot
     path and real time. The watcher waits for the handler to return, which for
     a file replay just pauses the video. After the rule's events of a frame,
-    `timers` is asked for timer events, which are logged and handled the same
-    way. `base_time` fixes the real time of video second 0 for a file replay.
+    `timers` is asked for timer events, given the plates read in the frame, and
+    they are logged and handled the same way. `base_time` fixes the real time of
+    video second 0 for a file replay.
 
     Raises FileNotFoundError or RuntimeError if the source cannot be opened.
     """
@@ -201,6 +210,9 @@ def run(
     )
     interval = 1 / settings.process_fps
     next_sample = -math.inf
+    # The latest frame in which each plate was read, with its stream time: the
+    # frame a LEFT event is about, since the car left then, not when the rule fired.
+    last_read: dict[str, tuple[float, np.ndarray]] = {}
     started = time.perf_counter()
     try:
         while capture.grab():
@@ -217,30 +229,47 @@ def run(
             mine = sum(read.text == masker.expected for read in reads)
             summary.reads_mine += mine
             summary.reads_other += len(reads) - mine
+            plates = {read.text for read in reads}
+            for plate in plates:
+                last_read[plate] = (now, frame)
             snapshot = None
 
-            def dispatch(events: list[Event]) -> None:
+            def frames_for(event: Event) -> EventFrames:
                 nonlocal snapshot
                 if snapshot is None:
                     snapshot = save_snapshot(frame, clock.snapshot_name(now))
+                if event.type == "LEFT" and event.plate in last_read:
+                    read_time, read_frame = last_read.pop(event.plate)
+                    read_snapshot = save_snapshot(read_frame, clock.snapshot_name(read_time) + "_last-read")
+                    return EventFrames(clock.real_time(now), snapshot, clock.real_time(read_time), read_snapshot)
+                return EventFrames(clock.real_time(now), snapshot, clock.real_time(now), snapshot)
+
+            def dispatch(events: list[Event]) -> None:
                 for event in events:
-                    log_event(event, snapshot, clock, masker)
+                    frames = frames_for(event)
+                    log_event(event, frames, clock, masker)
                     summary.events[event.type] += 1
                     if handler is not None:
-                        handler(event, snapshot, clock.real_time(event.time))
+                        handler(event, frames)
 
-            events = rule.update(now, [read.text for read in reads])
+            events = rule.update(now, plates)
             if events:
                 dispatch(events)
             if timers is not None:
                 # After the rule's events, so a LEFT closes the stay before the timer looks.
-                timer_events = timers(now, clock.real_time(now))
+                timer_events = timers(now, clock.real_time(now), plates)
                 if timer_events:
                     dispatch(timer_events)
+            # Frames of plates that are gone and not recently read are no longer needed.
+            for plate in [p for p, (t, _) in last_read.items() if p not in rule.present and now - t > settings.leave_after_s]:
+                del last_read[plate]
     except KeyboardInterrupt:
         print("stopped by Ctrl+C")
     finally:
         capture.release()
+        plate_reader.close()
+        last_read.clear()
+        gc.collect()
     summary.elapsed = time.perf_counter() - started
     summary.still_present = [masker.label(plate) for plate in sorted(rule.present)]
     return summary
@@ -310,5 +339,17 @@ def main() -> int:
     return 0
 
 
+def exit_now(code: int) -> None:
+    """Leave with the real exit code once output is flushed.
+
+    The ONNX Runtime and OpenCV libraries sometimes abort inside their own
+    teardown at interpreter exit (libc++ "recursive_mutex lock failed"), after
+    all our work is done. os._exit skips that teardown.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_now(main())

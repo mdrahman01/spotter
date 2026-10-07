@@ -80,18 +80,20 @@ def main() -> int:
     )
     timer = StayTimer(db, settings.ending_soon_s, settings.overstay_grace_s)
 
-    def timers(now: float, real_time: datetime) -> list[Event]:
-        return [Event(t.type, t.plate, now, now, now, 0) for t in timer.check(real_time)]
+    def timers(now: float, real_time: datetime, plates: set[str]) -> list[Event]:
+        return [Event(t.type, t.plate, now, now, now, 0) for t in timer.check(real_time, plates)]
 
     try:
         summary = watch.run(settings, masker, attendant.handle, timers, args.replay_base_time)
     except (FileNotFoundError, RuntimeError) as err:
         print(err, file=sys.stderr)
         return 2
+    finally:
+        db.close()
     watch.print_summary(summary, masker)
     attendant.print_stats()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    watch.exit_now(main())  # the database is closed inside main()

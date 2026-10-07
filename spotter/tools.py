@@ -31,11 +31,23 @@ DEFAULT_OVERSTAY_FEE_CENTS = 500
 class EventContext:
     """The event the tools act on."""
 
-    type: str  # ARRIVED or LEFT
+    type: str  # ARRIVED, ENDING_SOON, OVERSTAY or LEFT
     plate: str
-    at: datetime  # the event's real time
-    snapshot: str  # repo-relative path of the event's frame
+    at: datetime  # the real time the event fired
+    snapshot: str  # repo-relative path of the frame when it fired
+    last_read_at: datetime | None = None  # real time the plate was last read, when that differs (LEFT)
+    last_read_snapshot: str | None = None  # the frame of that last read
     started: float = 0.0  # time.perf_counter() when handling began, to time the light
+
+    @property
+    def departed_at(self) -> datetime:
+        """When the car was last seen: the time a stay ends and its bill runs to."""
+        return self.last_read_at or self.at
+
+    @property
+    def attachment(self) -> str:
+        """The frame attached to alerts: the last sighting for LEFT, else the event's frame."""
+        return self.last_read_snapshot or self.snapshot
 
 
 def dollars(cents: int) -> str:
@@ -91,8 +103,9 @@ PLATE_PARAM = {"plate": {"type": "string", "description": "The plate from the ev
 TOOL_SCHEMAS = [
     _tool(
         "lookup_booking",
-        "Look up the booking for the plate. Returns status active, outside_window or "
-        "no_booking, the booking if there is one, and any open stay.",
+        "Look up the booking for the plate. Returns status active, overstaying (the stay is "
+        "open but its booking has ended), outside_window or no_booking, the booking if there "
+        "is one, and any open stay.",
         PLATE_PARAM,
         ["plate"],
     ),
@@ -179,18 +192,28 @@ class Toolbox:
     def lookup_booking(self, plate: str) -> dict:
         if error := self._plate_error(plate):
             return error
+        open_stay = self._open_stay()
         active = self.db.booking_at(self.event.plate, self.event.at)
         if active:
-            return {"status": "active", "booking": public(active), "open_session": self._open_stay()}
+            return {"status": "active", "booking": public(active), "open_session": open_stay}
+        stay = self.db.open_session(self.event.plate)
+        if stay:
+            # A booked car still here after its booking ended is overstaying, not unbooked.
+            return {
+                "status": "overstaying",
+                "booking": public(self.db.booking(stay["booking_id"])),
+                "now": iso(self.event.at),
+                "open_session": open_stay,
+            }
         latest = self.db.latest_booking(self.event.plate)
         if latest:
             return {
                 "status": "outside_window",
                 "booking": public(latest),
                 "now": iso(self.event.at),
-                "open_session": self._open_stay(),
+                "open_session": None,
             }
-        return {"status": "no_booking", "booking": None, "open_session": self._open_stay()}
+        return {"status": "no_booking", "booking": None, "open_session": None}
 
     def start_session(self, plate: str) -> dict:
         if error := self._plate_error(plate):
@@ -215,11 +238,12 @@ class Toolbox:
         stay = self.db.open_session(self.event.plate)
         if stay is None:
             return {"error": "there is no open stay for this plate"}
-        self.db.close_session(stay["id"], self.event.at)
+        left_at = self.event.departed_at
+        self.db.close_session(stay["id"], left_at, self.event.attachment)
         return {
             "session_id": stay["id"],
             "arrived_at": stay["arrived_at"],
-            "left_at": iso(self.event.at),
+            "left_at": iso(left_at),
             "status": "closed",
         }
 
@@ -243,7 +267,7 @@ class Toolbox:
         fee = self.overstay_fee_cents if overstayed else 0
         total = parking + fee
         self.db.set_amount(session_id, total)
-        return {
+        result = {
             "session_id": session_id,
             "minutes": minutes,
             "rate": rate_text(rate),
@@ -251,10 +275,12 @@ class Toolbox:
             "minimum_charge": dollars(self.min_charge_cents),
             "minimum_charge_applied": bill_cents(arrived_at, left_at, rate)[1] < self.min_charge_cents,
             "overstayed": overstayed,
-            "overstay_fee": dollars(fee),
-            "total": dollars(total),
-            "amount_cents": total,
         }
+        if overstayed:  # a fee the model never sees is a fee it cannot mention
+            result["overstay_fee"] = dollars(fee)
+        result["total"] = dollars(total)
+        result["amount_cents"] = total
+        return result
 
     def set_light(self, color: str) -> dict:
         color = str(color).lower()
@@ -275,11 +301,11 @@ class Toolbox:
             if booking is None:
                 return {"error": "no booking for this plate, so there is no driver to alert"}
             name = booking["driver"]
-        error = self.alerts.send(Alert(to, name, message.strip(), self.event.snapshot))
+        error = self.alerts.send(Alert(to, name, message.strip(), self.event.attachment))
         return {
             "sent_to": to,
             "name": name,
-            "snapshot": self.event.snapshot,
+            "snapshot": self.event.attachment,
             "delivered": error is None,
             "delivery_error": error,
         }

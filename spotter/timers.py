@@ -1,12 +1,14 @@
-"""Timer events for open stays: ENDING_SOON and OVERSTAY.
+"""Timer events for open stays: ENDING_SOON and OVERSTAY, raised on a sighting.
 
-The watcher owns the clock, so it asks the timer on every processed frame.
-Each event is raised at most once per stay, which the database remembers:
-ENDING_SOON when the booking ends within ending_soon_s, OVERSTAY when the car
-is still present overstay_grace_s after the booking's end. Raising OVERSTAY
-marks the stay as overstayed; the model never decides that.
+The watcher owns the clock and, on every processed frame, tells the timer
+which plates it read. A timer event fires only on a read of its plate at or
+after the event's time, never by the clock alone, so a car last seen before a
+deadline gets neither the warning nor the fee. Each event is raised at most
+once per stay, which the database remembers; raising OVERSTAY marks the stay
+as overstayed at the time of that read. The model never decides that.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -22,6 +24,14 @@ class TimerEvent:
     plate: str
     session_id: int
     booking_ends_at: datetime
+
+
+def time_left_words(seconds: float) -> str:
+    """The time left on a booking as the driver is told it, made by code not the model."""
+    if seconds < 60:
+        return "less than a minute"
+    minutes = int(seconds / 60 + 0.5)  # nearest minute, halves up
+    return f"about {minutes} minute{'' if minutes == 1 else 's'}"
 
 
 def due(session: dict, booking: dict, now: datetime, ending_soon_s: float, overstay_grace_s: float) -> list[str]:
@@ -46,10 +56,13 @@ class StayTimer:
         self.ending_soon_s = ending_soon_s
         self.overstay_grace_s = overstay_grace_s
 
-    def check(self, now: datetime) -> list[TimerEvent]:
-        """Raise whatever is due for every open stay, and record it so it is raised once."""
+    def check(self, now: datetime, plates_read: Iterable[str]) -> list[TimerEvent]:
+        """Raise what is due for every open stay whose plate was read in this frame, once each."""
+        read = set(plates_read)
         events = []
         for session in self.db.open_sessions():
+            if session["plate"] not in read:
+                continue
             booking = self.db.booking(session["booking_id"])
             for kind in due(session, booking, now, self.ending_soon_s, self.overstay_grace_s):
                 if kind == ENDING_SOON:

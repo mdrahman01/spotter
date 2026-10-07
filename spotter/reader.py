@@ -58,3 +58,7 @@ class PlateReader:
             if text and result.detection.confidence >= self.min_det_conf:
                 reads.append(PlateRead(text, float(result.detection.confidence)))
         return reads
+
+    def close(self) -> None:
+        """Drop the ONNX sessions now, rather than leaving them to interpreter exit."""
+        self.alpr = None

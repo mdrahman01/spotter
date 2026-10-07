@@ -9,6 +9,7 @@ for a file, wall-clock time for a live stream) and must never go backwards.
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 # Allowance for floating-point error when comparing times, e.g. 26.0 - 22.0 with 4.
 EPSILON = 1e-6
@@ -22,6 +23,21 @@ class Event:
     first_seen: float  # first read of this stay
     last_seen: float  # latest read of this stay
     reads: int  # reads of the plate during this stay
+
+
+@dataclass(frozen=True)
+class EventFrames:
+    """What the watcher hands over with an event: the real times and frames behind it.
+
+    For LEFT the plate was last read some seconds before the rule fired, so
+    last_read_at and last_read_snapshot differ from at and snapshot. For every
+    other event they are the same moment and the same frame.
+    """
+
+    at: datetime  # real time the event fired
+    snapshot: str  # repo-relative path of the frame when it fired
+    last_read_at: datetime  # real time the plate was last read
+    last_read_snapshot: str  # repo-relative path of that frame
 
 
 @dataclass

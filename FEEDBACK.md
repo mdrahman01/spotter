@@ -237,3 +237,36 @@ the first run.
 - One run of three ended with a native crash at interpreter exit (libc++
   "recursive_mutex lock failed", exit -6) after all output and the database
   writes were complete; it is from the ONNX/OpenCV teardown, not the model.
+
+## 2026-10-07 — Week 3 fix-up: what caused Nemotron's wording slips
+
+Fixes were made in what the model is given, not by adding rules. Over this
+round it made 1135 calls in 99 saved runs, 0.27 to 0.64 s each, with
+reasoning tokens in 0 of them.
+
+- "The unbooked car has left", closing a booked car's LEFT. Two causes: every
+  LEFT event carried stayed_for, a field only the unbooked-car rule mentions,
+  so the model reached for that rule's sentence; and at LEFT the booking had
+  expired, so lookup_booking answered outside_window, which the arrival rule
+  equates with an unbooked car. Fixed by sending stayed_for only when there is
+  no open stay, by reporting an open stay past its booking as "overstaying",
+  and by taking the phrase out of the unbooked-car LEFT rule so there is no
+  template to echo; the closing-sentence rule now asks for the actions taken.
+  No alert or sentence said "unbooked" wrongly after that, in 10 runs.
+- "$0.00" fee in a plain bill: compute_bill had shown it. The result now
+  carries overstay_fee only when one applied.
+- "Ends in 1 minute" with 4 s left: we had sent minutes_left=1. The event now
+  carries time-left words made by code ("less than a minute", "about N
+  minutes"), and the model used them as given in every run.
+- Fee amount missing from the OVERSTAY driver alert: the amount was in the
+  event but the rule did not point at it; it does now, and every alert since
+  states "$5.00".
+- Still open: in 2 of the final 3 overstay runs the LEFT of the overstaying
+  car got an extra owner alert ("has left after staying ...") and no light-off;
+  the model mixed the unbooked-car LEFT rule into the booked one once the
+  booking had expired. The third run and the Telegram run were clean. Left as
+  it is rather than adding a rule.
+- Not the model: one run in 20 died at interpreter exit (libc++
+  recursive_mutex) after all work was done; releasing the capture and the ONNX
+  objects did not help (4 in 20), ending with os._exit after flushing did
+  (0 in 20).

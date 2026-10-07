@@ -41,9 +41,9 @@ class Scene:
         self.overstay_fee = overstay_fee
         self.tools = self.rebind(event_type, plate, at)
 
-    def rebind(self, event_type, plate=PLATE, at=T0) -> Toolbox:
-        """A toolbox for a later event on the same database."""
-        context = EventContext(event_type, plate, at, SNAPSHOT)
+    def rebind(self, event_type, plate=PLATE, at=T0, **frames) -> Toolbox:
+        """A toolbox for a later event on the same database; frames may give last_read_at etc."""
+        context = EventContext(event_type, plate, at, SNAPSHOT, **frames)
         self.tools = Toolbox(self.db, self.light, self.alerts, context, self.min_charge, self.overstay_fee)
         return self.tools
 
@@ -88,6 +88,15 @@ class ToolRulesTest(unittest.TestCase):
         late = Scene(at=T0 + timedelta(hours=20)).tools.lookup_booking(PLATE)
         self.assertEqual(late["status"], "outside_window")
         self.assertEqual(late["booking"]["driver"], "Dana Driver")
+
+    def test_an_open_stay_past_its_booking_is_overstaying_not_unbooked(self):
+        scene = Scene()
+        scene.tools.start_session(PLATE)
+        scene.db.mark_overstayed(1, T0 + timedelta(hours=11, minutes=5))
+        later = scene.rebind("LEFT", at=T0 + timedelta(hours=12)).lookup_booking(PLATE)
+        self.assertEqual(later["status"], "overstaying")
+        self.assertEqual(later["booking"]["driver"], "Dana Driver")
+        self.assertEqual(later["open_session"]["overstayed"], True)
         none = Scene(booked=False).tools.lookup_booking(PLATE)
         self.assertEqual((none["status"], none["booking"]), ("no_booking", None))
 
@@ -138,7 +147,8 @@ class ToolRulesTest(unittest.TestCase):
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
         self.assertEqual((bill["minutes"], bill["amount_cents"], bill["total"]), (1, 9, "$0.09"))
-        self.assertEqual((bill["parking"], bill["overstay_fee"], bill["overstayed"]), ("$0.09", "$0.00", False))
+        self.assertEqual((bill["parking"], bill["overstayed"]), ("$0.09", False))
+        self.assertNotIn("overstay_fee", bill)  # no fee applied, so the model sees none
         self.assertEqual(bill["rate"], "$5.00/hour")
         self.assertNotIn("rate_cents_per_hour", bill)
         self.assertEqual(scene.db.session(1)["amount_cents"], 9)
@@ -168,6 +178,32 @@ class ToolRulesTest(unittest.TestCase):
             ("$1.00", "$5.00", "$6.00", 600, True),
         )
         self.assertEqual(scene.db.session(1)["amount_cents"], 600)
+
+    def test_a_stay_ends_when_the_car_was_last_read(self):
+        scene = Scene(min_charge=0)
+        scene.tools.start_session(PLATE)
+        left = scene.rebind(
+            "LEFT",
+            at=T0 + timedelta(seconds=26.22),
+            last_read_at=T0 + timedelta(seconds=22.22),
+            last_read_snapshot="data/snapshots/last-read.jpg",
+        )
+        ended = left.end_session(PLATE)
+        self.assertEqual(ended["left_at"], "2026-01-01T12:00:22+00:00")
+        session = scene.db.session(1)
+        self.assertEqual((session["left_at"], session["left_snapshot"]),
+                         ("2026-01-01T12:00:22+00:00", "data/snapshots/last-read.jpg"))
+        self.assertEqual(left.compute_bill(1)["minutes"], 1)
+        # LEFT alerts carry the frame of the last sighting, not the frame when LEFT fired.
+        self.assertEqual(left.send_alert("driver", "Bye.")["snapshot"], "data/snapshots/last-read.jpg")
+        self.assertEqual(scene.alerts.sent[-1].snapshot, "data/snapshots/last-read.jpg")
+
+    def test_other_events_end_and_attach_at_their_own_time(self):
+        scene = Scene(min_charge=0)
+        scene.tools.start_session(PLATE)
+        self.assertEqual(scene.tools.send_alert("owner", "Hi.")["snapshot"], SNAPSHOT)
+        ended = scene.rebind("LEFT", at=T0 + timedelta(seconds=90)).end_session(PLATE)
+        self.assertEqual(ended["left_at"], "2026-01-01T12:01:30+00:00")  # no last read given: the event time
 
     def test_the_overstay_fee_is_a_setting(self):
         scene = Scene(min_charge=0, overstay_fee=250)

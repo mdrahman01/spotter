@@ -3,8 +3,11 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from spotter.alerts import ConsoleAlerts
 from spotter.db import Database
-from spotter.timers import ENDING_SOON, OVERSTAY, StayTimer, due
+from spotter.light import ConsoleLight
+from spotter.timers import ENDING_SOON, OVERSTAY, StayTimer, due, time_left_words
+from spotter.tools import EventContext, Toolbox
 
 PLATE = "TEST123"
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -24,8 +27,9 @@ class Scene:
         self.session_id = self.db.start_session(PLATE, self.booking_id, arrived_at)
         self.timer = StayTimer(self.db, ending_soon_s=4, overstay_grace_s=3)
 
-    def kinds(self, at: float) -> list[str]:
-        return [event.type for event in self.timer.check(seconds(at))]
+    def kinds(self, at: float, read: bool = True) -> list[str]:
+        """Timer events at T0 + at seconds, on a frame that did or did not read the plate."""
+        return [event.type for event in self.timer.check(seconds(at), {PLATE} if read else set())]
 
 
 class TimerRuleTest(unittest.TestCase):
@@ -51,7 +55,7 @@ class TimerRuleTest(unittest.TestCase):
 
     def test_events_carry_the_plate_the_stay_and_the_booking_end(self):
         scene = Scene()
-        event = scene.timer.check(seconds(8))[0]
+        event = scene.timer.check(seconds(8), {PLATE})[0]
         self.assertEqual((event.type, event.plate, event.session_id, event.booking_ends_at),
                          (ENDING_SOON, PLATE, scene.session_id, ENDS))
 
@@ -75,8 +79,44 @@ class TimerRuleTest(unittest.TestCase):
         scene = Scene()
         other = scene.db.add_booking("OTHER99", "Ola", T0, T0 + timedelta(hours=1), 500)
         scene.db.start_session("OTHER99", other, T0)
-        events = scene.timer.check(seconds(15))
+        events = scene.timer.check(seconds(15), {PLATE, "OTHER99"})
         self.assertEqual([(e.type, e.plate) for e in events], [(OVERSTAY, PLATE)])
+
+    def test_nothing_fires_without_a_sighting_of_the_plate(self):
+        scene = Scene()
+        self.assertEqual(scene.kinds(8, read=False), [])
+        self.assertEqual(scene.kinds(15, read=False), [])
+        self.assertEqual(scene.kinds(16, read=True), [OVERSTAY])  # no warning: the booking has ended
+        self.assertEqual(scene.db.session(scene.session_id)["overstayed_at"], "2026-01-01T12:00:16+00:00")
+
+    def test_a_car_last_read_before_the_deadline_gets_no_fee(self):
+        scene = Scene()
+        self.assertEqual(scene.kinds(8), [ENDING_SOON])
+        self.assertEqual(scene.kinds(14), [])  # the last read, one second before the deadline
+        for at in (15, 16, 18):  # frames without the plate
+            self.assertEqual(scene.kinds(at, read=False), [])
+        self.assertIsNone(scene.db.session(scene.session_id)["overstayed_at"])
+        # LEFT fires at 18 s; the stay ends at the last read and is billed without a fee.
+        context = EventContext("LEFT", PLATE, seconds(18), "data/snapshots/left.jpg",
+                               last_read_at=seconds(14), last_read_snapshot="data/snapshots/last.jpg")
+        tools = Toolbox(scene.db, ConsoleLight(say=lambda line: None), ConsoleAlerts(say=lambda line: None),
+                        context, 100, 500)
+        self.assertEqual(tools.end_session(PLATE)["left_at"], "2026-01-01T12:00:14+00:00")
+        bill = tools.compute_bill(scene.session_id)
+        self.assertEqual((bill["overstayed"], bill["total"], bill["amount_cents"]), (False, "$1.00", 100))
+        self.assertNotIn("overstay_fee", bill)
+        self.assertEqual(scene.kinds(20), [])  # closed stays stay quiet
+
+    def test_time_left_words(self):
+        self.assertEqual(time_left_words(0), "less than a minute")
+        self.assertEqual(time_left_words(4), "less than a minute")
+        self.assertEqual(time_left_words(59.9), "less than a minute")
+        self.assertEqual(time_left_words(60), "about 1 minute")
+        self.assertEqual(time_left_words(89), "about 1 minute")
+        self.assertEqual(time_left_words(90), "about 2 minutes")
+        self.assertEqual(time_left_words(600), "about 10 minutes")
+        self.assertEqual(time_left_words(629), "about 10 minutes")
+        self.assertEqual(time_left_words(630), "about 11 minutes")
 
     def test_due_is_pure(self):
         booking = {"ends_at": "2026-01-01T12:00:12+00:00"}

@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
     amount_cents INTEGER,
     ending_soon_at TEXT,
-    overstayed_at TEXT
+    overstayed_at TEXT,
+    left_snapshot TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_session_per_plate
     ON sessions (plate) WHERE status = 'open';
@@ -62,9 +63,10 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
-        # Databases created before the timer events lack these two columns.
+        # Databases created before the timer events and the departure snapshot
+        # lack these columns.
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(sessions)")}
-        for column in ("ending_soon_at", "overstayed_at"):
+        for column in ("ending_soon_at", "overstayed_at", "left_snapshot"):
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
         self.conn.commit()
@@ -135,12 +137,16 @@ class Database:
             )
         return cursor.lastrowid
 
-    def close_session(self, session_id: int, left_at: datetime) -> None:
+    def close_session(self, session_id: int, left_at: datetime, snapshot: str | None = None) -> None:
+        """Close a stay at `left_at`, keeping the path of the frame that last showed the car."""
         with self.conn:
             self.conn.execute(
-                "UPDATE sessions SET left_at = ?, status = 'closed' WHERE id = ?",
-                (iso(left_at), session_id),
+                "UPDATE sessions SET left_at = ?, status = 'closed', left_snapshot = ? WHERE id = ?",
+                (iso(left_at), snapshot, session_id),
             )
+
+    def close(self) -> None:
+        self.conn.close()
 
     def mark_ending_soon(self, session_id: int, at: datetime) -> None:
         """Record that the ending-soon warning was raised, so it is raised once."""
