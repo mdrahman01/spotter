@@ -146,3 +146,38 @@ first attempt, the probe has cost about $0.51.
 - The state went `STARTING`, `IMAGE_PULLING`, `STARTING`, `RUNNING`. The API
   definition describes `STARTING -> IMAGE_PULLING -> RUNNING`, so a script that
   reads a return to `STARTING` as a restart would be wrong.
+
+## 2026-10-06 — Week 2: Nemotron as the attendant, calling tools
+
+`nvidia/Nemotron-3_5-Lightning` on Nebius Token Factory decides what to do
+about each ARRIVED or LEFT event by calling six tools: booking lookup, start
+and end of a stay, bill, light, alert. Two replays of the 30 s test video, one
+with a booking for the car and one without. Both scenarios passed on the first
+run: 17 model calls, 14 tool calls, no tool errors.
+
+**Latency**
+
+- 0.30 to 0.71 s per model call, 0.40 s on average, with 1.2k to 1.8k prompt
+  tokens each (system prompt, event, six tool schemas and the conversation so
+  far).
+- From an event to the light changing: 1.5 s (green on arrival) and 1.9 s (off
+  on leaving) with a booking; 1.0 s and 0.6 s without. Each light change needs
+  two or three model calls, because the model looks up the booking first.
+
+**Reasoning tokens**
+
+- Zero in all 17 calls. With tools in the request the model did not reason at
+  all, where in Week 1 the same model spent 293 reasoning tokens on a one-line
+  reply with no tools. Completion tokens were 11 to 74 per call.
+
+**What it got wrong**
+
+- Nothing against the rules: it looked up the booking first every time,
+  started and ended the stay, billed, set the light, alerted the right person
+  and finished with one sentence.
+- It mostly made one tool call per round, so the LEFT event with a booking took
+  all six rounds we allow (lookup, end, bill, alert, light off, final
+  sentence); one more required step would have been cut off. For the unknown
+  car it did put the red light and the owner alert in one round.
+- The bill alert quoted the rate as "500 cents/hour", straight from the tool
+  result, rather than as dollars.

@@ -11,7 +11,8 @@ the same events every time. A live stream is timed by the wall clock.
 
 For each event one JSON line is appended to data/events.jsonl, the frame is
 saved under data/snapshots/, and one line is printed. With --expect PLATE the
-printed lines say MINE or OTHER instead of the plate text.
+printed lines say MINE or OTHER instead of the plate text. spotter.run adds a
+handler that passes each event to the attendant.
 
 The video shows other people's cars: a plate's text is printed or stored only
 once it has ARRIVED; every other read is only counted. data/ and samples/ are
@@ -25,7 +26,9 @@ import math
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -34,7 +37,9 @@ import numpy as np
 from dotenv import load_dotenv
 
 from spotter import config
+from spotter.config import Settings
 from spotter.events import ArriveLeaveRule, Event
+from spotter.privacy import Masker
 from spotter.reader import PlateReader, normalize, zone_box
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +51,9 @@ SNAPSHOT_DIR = DATA_DIR / "snapshots"
 # next sample time.
 EPSILON = 1e-6
 
+EventHandler = Callable[[Event, str, datetime], None]
+"""Called with each event, its snapshot path, and its real (wall-clock) time."""
+
 
 class Clock:
     """Event times in seconds: video time for a file, wall-clock time for a live stream."""
@@ -54,9 +62,16 @@ class Clock:
         self.live = live
         self.fps = fps
         self.name = name
+        # For a file, video time is added to this to get real timestamps.
+        self.run_started = datetime.now(timezone.utc)
 
     def now(self, frame_index: int) -> float:
         return time.time() if self.live else frame_index / self.fps
+
+    def real_time(self, t: float) -> datetime:
+        if self.live:
+            return datetime.fromtimestamp(t, timezone.utc)
+        return self.run_started + timedelta(seconds=t)
 
     def label(self, t: float) -> str:
         if self.live:
@@ -69,19 +84,25 @@ class Clock:
         return f"{self.name}_{t:08.2f}s"
 
 
+@dataclass
+class Summary:
+    live: bool
+    fps: float
+    received: int = 0
+    sampled: int = 0
+    reads_mine: int = 0
+    reads_other: int = 0
+    events: Counter = field(default_factory=Counter)
+    still_present: list[str] = field(default_factory=list)
+    elapsed: float = 0.0
+
+
 def printable(source: str) -> str:
     """The source as it may be printed: a URL loses any user:password@ and query."""
     if "://" not in source:
         return source
     parts = urlsplit(source)
     return f"{parts.scheme}://{parts.netloc.rsplit('@', 1)[-1]}{parts.path}"
-
-
-def who(plate: str, expected: str | None) -> str:
-    """How an arrived plate is printed: MINE or OTHER with --expect, else its text."""
-    if expected is None:
-        return plate
-    return "MINE" if plate == expected else "OTHER"
 
 
 def save_snapshot(frame: np.ndarray, name: str) -> str:
@@ -93,7 +114,7 @@ def save_snapshot(frame: np.ndarray, name: str) -> str:
     return str(path.relative_to(REPO_ROOT))
 
 
-def log_event(event: Event, snapshot: str, clock: Clock, expected: str | None) -> None:
+def log_event(event: Event, snapshot: str, clock: Clock, masker: Masker) -> None:
     """Append the event to data/events.jsonl and print one line about it."""
     record = {
         "type": event.type,
@@ -108,57 +129,38 @@ def log_event(event: Event, snapshot: str, clock: Clock, expected: str | None) -
     with EVENTS_PATH.open("a", encoding="utf-8") as events_file:
         events_file.write(json.dumps(record) + "\n")
     print(
-        f"{event.type:<7} {who(event.plate, expected)} | at {clock.label(event.time)}"
+        f"{event.type:<7} {masker.label(event.plate)} | at {clock.label(event.time)}"
         f" | first seen {clock.label(event.first_seen)}"
         f" | last seen {clock.label(event.last_seen)}"
-        f" | {event.reads} reads | {snapshot}"
+        f" | {event.reads} reads | {snapshot}",
+        flush=True,
     )
 
 
-def main() -> int:
-    sys.stdout.reconfigure(line_buffering=True)
-    parser = argparse.ArgumentParser(
-        prog="python -m spotter.watch",
-        description="Turn a video file or live stream into ARRIVED and LEFT events.",
-    )
-    config.add_arguments(parser)
-    parser.add_argument(
-        "--expect",
-        metavar="PLATE",
-        help="your plate text: event lines say MINE or OTHER instead of plate "
-        "text, and the summary splits the reads",
-    )
-    args = parser.parse_args()
+def run(settings: Settings, masker: Masker, handler: EventHandler | None = None) -> Summary:
+    """Replay a file or follow a live stream to its end, and return the counts.
 
-    load_dotenv(REPO_ROOT / ".env")
-    try:
-        settings = config.load(vars(args))
-    except ValueError as err:
-        parser.error(str(err))
+    Prints the source, the settings and one line per event. Each event also
+    goes to the handler, if given, as soon as it happens, with its snapshot
+    path and real time. The watcher waits for the handler to return, which for
+    a file replay just pauses the video.
+
+    Raises FileNotFoundError or RuntimeError if the source cannot be opened.
+    """
     source = settings.source
-    if not source:
-        parser.error(f"no source: pass --source or set {config.env_name('source')}")
-    expected = None
-    if args.expect is not None:
-        expected = normalize(args.expect)
-        if not expected:
-            parser.error("--expect needs at least one letter or digit")
-
     live = "://" in source
     if not live and not Path(source).is_file():
-        print(f"no such video file: {source}", file=sys.stderr)
-        return 2
+        raise FileNotFoundError(f"no such video file: {source}")
     capture = cv2.VideoCapture(source)
     if not capture.isOpened():
-        print(f"could not open {printable(source)}", file=sys.stderr)
-        return 2
+        raise RuntimeError(f"could not open {printable(source)}")
     fps = capture.get(cv2.CAP_PROP_FPS)
     if not live and fps <= 0:
-        print(f"{source} reports no frame rate", file=sys.stderr)
-        return 2
+        raise RuntimeError(f"{source} reports no frame rate")
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     clock = Clock(live, fps, Path(source).stem)
+    summary = Summary(live, fps)
 
     if live:
         print(f"source: {printable(source)} (live stream, timed by the wall clock)")
@@ -175,7 +177,7 @@ def main() -> int:
         f" | arrive: {settings.arrive_reads} reads within {settings.arrive_window_s}s"
         f" | leave: {settings.leave_after_s}s unread"
     )
-    if expected:
+    if masker.expected:
         print("--expect given: event lines say MINE or OTHER")
 
     plate_reader = PlateReader(settings.zone, settings.min_det_conf)
@@ -184,55 +186,102 @@ def main() -> int:
     )
     interval = 1 / settings.process_fps
     next_sample = -math.inf
-    frame_index = sampled = reads_mine = reads_other = 0
-    event_counts: Counter[str] = Counter()
     started = time.perf_counter()
     try:
         while capture.grab():
-            now = clock.now(frame_index)
-            frame_index += 1
+            now = clock.now(summary.received)
+            summary.received += 1
             if now + EPSILON < next_sample:
                 continue
             next_sample = (math.floor(now / interval + EPSILON) + 1) * interval
             ok, frame = capture.retrieve()
             if not ok:
                 continue
-            sampled += 1
+            summary.sampled += 1
             reads = plate_reader.read(frame)
-            mine = sum(read.text == expected for read in reads)
-            reads_mine += mine
-            reads_other += len(reads) - mine
+            mine = sum(read.text == masker.expected for read in reads)
+            summary.reads_mine += mine
+            summary.reads_other += len(reads) - mine
             events = rule.update(now, [read.text for read in reads])
-            if events:
-                snapshot = save_snapshot(frame, clock.snapshot_name(now))
-                for event in events:
-                    log_event(event, snapshot, clock, expected)
-                    event_counts[event.type] += 1
+            if not events:
+                continue
+            snapshot = save_snapshot(frame, clock.snapshot_name(now))
+            for event in events:
+                log_event(event, snapshot, clock, masker)
+                summary.events[event.type] += 1
+                if handler is not None:
+                    handler(event, snapshot, clock.real_time(event.time))
     except KeyboardInterrupt:
         print("stopped by Ctrl+C")
     finally:
         capture.release()
-    elapsed = time.perf_counter() - started
+    summary.elapsed = time.perf_counter() - started
+    summary.still_present = [masker.label(plate) for plate in sorted(rule.present)]
+    return summary
 
+
+def print_summary(summary: Summary, masker: Masker) -> None:
     print("--- summary ---")
-    if live:
-        print(f"sampled frames: {sampled} of {frame_index} received in {elapsed:.0f}s")
+    if summary.live:
+        print(
+            f"sampled frames: {summary.sampled} of {summary.received} received"
+            f" in {summary.elapsed:.0f}s"
+        )
     else:
         print(
-            f"sampled frames: {sampled} of {frame_index} "
-            f"({frame_index / fps:.2f}s of video processed in {elapsed:.1f}s)"
+            f"sampled frames: {summary.sampled} of {summary.received} "
+            f"({summary.received / summary.fps:.2f}s of video processed in {summary.elapsed:.1f}s)"
         )
-    if expected is None:
-        print(f"plate reads: {reads_other} (a text is shown only once its plate arrives)")
+    if masker.expected is None:
+        print(f"plate reads: {summary.reads_other} (a text is shown only once its plate arrives)")
     else:
-        print(f"reads of my plate: {reads_mine}")
-        print(f"reads of other text: {reads_other}")
+        print(f"reads of my plate: {summary.reads_mine}")
+        print(f"reads of other text: {summary.reads_other}")
     print(
-        f"events: {event_counts.total()} "
-        f"({event_counts['ARRIVED']} ARRIVED, {event_counts['LEFT']} LEFT)"
+        f"events: {summary.events.total()} "
+        f"({summary.events['ARRIVED']} ARRIVED, {summary.events['LEFT']} LEFT)"
     )
-    still_present = [who(plate, expected) for plate in sorted(rule.present)]
-    print(f"still present at the end: {', '.join(still_present) or 'none'}")
+    print(f"still present at the end: {', '.join(summary.still_present) or 'none'}")
+
+
+def parse_args(parser: argparse.ArgumentParser) -> tuple[Settings, Masker]:
+    """Shared by spotter.watch and spotter.run: settings plus the --expect masker."""
+    config.add_arguments(parser)
+    parser.add_argument(
+        "--expect",
+        metavar="PLATE",
+        help="your plate text: printed output says MINE or OTHER instead of plate "
+        "text, and the summary splits the reads",
+    )
+    args = parser.parse_args()
+    load_dotenv(REPO_ROOT / ".env")
+    try:
+        settings = config.load(vars(args))
+    except ValueError as err:
+        parser.error(str(err))
+    if not settings.source:
+        parser.error(f"no source: pass --source or set {config.env_name('source')}")
+    expected = None
+    if args.expect is not None:
+        expected = normalize(args.expect)
+        if not expected:
+            parser.error("--expect needs at least one letter or digit")
+    return settings, Masker(expected)
+
+
+def main() -> int:
+    sys.stdout.reconfigure(line_buffering=True)
+    parser = argparse.ArgumentParser(
+        prog="python -m spotter.watch",
+        description="Turn a video file or live stream into ARRIVED and LEFT events.",
+    )
+    settings, masker = parse_args(parser)
+    try:
+        summary = run(settings, masker)
+    except (FileNotFoundError, RuntimeError) as err:
+        print(err, file=sys.stderr)
+        return 2
+    print_summary(summary, masker)
     return 0
 
 
