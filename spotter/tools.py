@@ -4,9 +4,10 @@ The code, not the model, enforces the rules and does the arithmetic:
 - a tool acts only on the plate of the current event;
 - a plate has one open stay at a time, and a stay needs a booking covering its start;
 - the bill is per started minute at the booking's rate, with a one-minute
-  minimum, rounded up to whole cents.
+  minimum, rounded up to whole cents, and never below the minimum charge.
 A broken rule comes back to the model as {"error": ...}; nothing raises. Error
-messages never contain plate text, so they can be printed as they are.
+messages never contain plate text, so they can be printed as they are. Money
+is shown to the model as dollars ("$5.00/hour"), never as cents.
 """
 
 import json
@@ -21,6 +22,7 @@ from spotter.light import COLORS, Light
 from spotter.reader import normalize
 
 PLATE_RULE = "this tool may only act on the plate in the current event"
+DEFAULT_MIN_CHARGE_CENTS = 100
 
 
 @dataclass(frozen=True)
@@ -34,22 +36,37 @@ class EventContext:
     started: float = 0.0  # time.perf_counter() when handling began, to time the light
 
 
-def bill_cents(arrived_at: datetime, left_at: datetime, rate_cents_per_hour: int) -> tuple[int, int]:
+def dollars(cents: int) -> str:
+    return f"${cents / 100:.2f}"
+
+
+def rate_text(cents_per_hour: int) -> str:
+    return f"{dollars(cents_per_hour)}/hour"
+
+
+def bill_cents(
+    arrived_at: datetime, left_at: datetime, rate_cents_per_hour: int, min_charge_cents: int = 0
+) -> tuple[int, int]:
     """(started minutes, amount in cents) for a stay.
 
-    Every started minute counts, with a minimum of one, and the amount is
-    rounded up to the next whole cent.
+    Every started minute counts, with a minimum of one, the amount is rounded
+    up to the next whole cent, and it is never below min_charge_cents.
     """
     seconds = max(0.0, (left_at - arrived_at).total_seconds())
     minutes = max(1, math.ceil(seconds / 60 - 1e-9))
     amount = -(-minutes * rate_cents_per_hour // 60)  # integer ceiling division
-    return minutes, amount
+    return minutes, max(amount, min_charge_cents)
 
 
 def public(booking: dict) -> dict:
-    """A booking as shown to the model: everything but the plate, which it already knows."""
-    keys = ("id", "driver", "starts_at", "ends_at", "rate_cents_per_hour")
-    return {key: booking[key] for key in keys}
+    """A booking as shown to the model: no plate (it knows it) and the rate in dollars."""
+    return {
+        "id": booking["id"],
+        "driver": booking["driver"],
+        "starts_at": booking["starts_at"],
+        "ends_at": booking["ends_at"],
+        "rate": rate_text(booking["rate_cents_per_hour"]),
+    }
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -81,7 +98,7 @@ TOOL_SCHEMAS = [
     _tool("end_session", "End the open stay of the plate.", PLATE_PARAM, ["plate"]),
     _tool(
         "compute_bill",
-        "Compute and record the bill for an ended stay.",
+        "Compute and record the bill for an ended stay. Returns the amount and the rate as dollars.",
         {"session_id": {"type": "integer", "description": "The stay's session_id."}},
         ["session_id"],
     ),
@@ -93,7 +110,7 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "send_alert",
-        "Send a message to the owner or to the booked driver. The event's snapshot is attached by the code.",
+        "Send a message to the owner or to the booked driver. The event's snapshot photo is attached by the code.",
         {
             "to": {"type": "string", "enum": ["owner", "driver"]},
             "message": {"type": "string", "description": "One or two sentences."},
@@ -107,11 +124,19 @@ TOOL_NAMES = [schema["function"]["name"] for schema in TOOL_SCHEMAS]
 class Toolbox:
     """The six tools, bound to the event they are allowed to act on."""
 
-    def __init__(self, db: Database, light: Light, alerts: Alerts, event: EventContext) -> None:
+    def __init__(
+        self,
+        db: Database,
+        light: Light,
+        alerts: Alerts,
+        event: EventContext,
+        min_charge_cents: int = DEFAULT_MIN_CHARGE_CENTS,
+    ) -> None:
         self.db = db
         self.light = light
         self.alerts = alerts
         self.event = event
+        self.min_charge_cents = min_charge_cents
 
     def call(self, name: str, arguments: str) -> dict:
         """Run one tool call as the model made it. Always returns a dict."""
@@ -200,15 +225,22 @@ class Toolbox:
             return {"error": "the stay is still open; end it before billing"}
         booking = self.db.booking(session["booking_id"])
         minutes, amount = bill_cents(
-            parse(session["arrived_at"]), parse(session["left_at"]), booking["rate_cents_per_hour"]
+            parse(session["arrived_at"]),
+            parse(session["left_at"]),
+            booking["rate_cents_per_hour"],
+            self.min_charge_cents,
         )
         self.db.set_amount(session_id, amount)
         return {
             "session_id": session_id,
             "minutes": minutes,
-            "rate_cents_per_hour": booking["rate_cents_per_hour"],
+            "rate": rate_text(booking["rate_cents_per_hour"]),
             "amount_cents": amount,
-            "amount": f"${amount / 100:.2f}",
+            "amount": dollars(amount),
+            "minimum_charge": dollars(self.min_charge_cents),
+            "minimum_charge_applied": amount == self.min_charge_cents
+            and bill_cents(parse(session["arrived_at"]), parse(session["left_at"]), booking["rate_cents_per_hour"])[1]
+            < self.min_charge_cents,
         }
 
     def set_light(self, color: str) -> dict:
@@ -230,5 +262,11 @@ class Toolbox:
             if booking is None:
                 return {"error": "no booking for this plate, so there is no driver to alert"}
             name = booking["driver"]
-        self.alerts.send(Alert(to, name, message.strip(), self.event.snapshot))
-        return {"sent_to": to, "name": name, "snapshot": self.event.snapshot}
+        error = self.alerts.send(Alert(to, name, message.strip(), self.event.snapshot))
+        return {
+            "sent_to": to,
+            "name": name,
+            "snapshot": self.event.snapshot,
+            "delivered": error is None,
+            "delivery_error": error,
+        }

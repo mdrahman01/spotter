@@ -181,3 +181,29 @@ run: 17 model calls, 14 tool calls, no tool errors.
   car it did put the red light and the owner alert in one round.
 - The bill alert quoted the rate as "500 cents/hour", straight from the tool
   result, rather than as dollars.
+
+## 2026-10-06 — Week 2: attendant fixes, alerts over Telegram
+
+Same two scenarios as above, now with the owner and driver alerts delivered to
+a Telegram chat as photos, a round cap of 10, a $1.00 minimum charge, dollar
+amounts in tool results, and a tighter prompt for the unbooked car. Both
+passed on the first run: 17 model calls, 15 tool calls, no tool errors, four
+alerts delivered.
+
+**Nemotron notes**
+
+- Latency 0.30 to 0.64 s per call, 0.40 to 0.45 s on average, with 1.3k to
+  1.9k prompt tokens; zero reasoning tokens again in every call. From an event
+  to the light: 1.5 s and 2.9 s with a booking, 1.1 s and 1.6 s without (the
+  Telegram upload now sits between some of those calls).
+- The tightened rules were followed to the letter: the owner alert for the
+  unbooked car says the car is in the spot and a photo is attached, with no
+  advice to contact the driver; on leaving, the owner is told the car has gone
+  and that it stayed 16 seconds, the figure the event carried.
+- Giving the model "$5.00/hour" instead of a cents figure fixed the bill
+  wording: the driver's bill alert now reads in dollars.
+- It still made one tool call per round for the booked car (6 rounds for
+  LEFT), but paired the alert and the light change in one round for the
+  unbooked car, both on arrival and on leaving.
+- Nothing it got wrong. It puts the plate text in alert messages, which is
+  right for the owner and is masked in printed output by --expect.

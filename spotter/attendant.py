@@ -19,11 +19,11 @@ from spotter.db import Database, iso
 from spotter.events import Event
 from spotter.light import Light
 from spotter.privacy import Masker
-from spotter.tools import TOOL_SCHEMAS, EventContext, Toolbox
+from spotter.tools import DEFAULT_MIN_CHARGE_CENTS, TOOL_SCHEMAS, EventContext, Toolbox
 
 BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 MODEL = "nvidia/Nemotron-3_5-Lightning"
-MAX_ROUNDS = 6
+MAX_ROUNDS = 10
 ATTEMPTS = 2  # tries per model call before the attendant counts as offline
 
 SYSTEM_PROMPT = """\
@@ -35,9 +35,10 @@ all arithmetic; a tool that returns {"error": ...} did nothing.
 Rules:
 1. Always call lookup_booking first. Never assume a booking.
 2. ARRIVED with a booking whose status is "active": start_session, set_light green, send_alert to the driver.
-3. ARRIVED with anything else (no booking, or outside its window): set_light red, send_alert to the owner.
-4. LEFT: if a stay is open, end_session, compute_bill and send_alert the bill to the driver; then set_light off.
-5. When done, reply with one short sentence and no more tool calls.
+3. ARRIVED with anything else (no booking, or outside its window): set_light red, then send_alert to the owner saying that an unbooked car is in the spot and that a photo is attached. Do not suggest contacting the driver.
+4. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, then set_light off.
+5. LEFT with no open stay: send_alert to the owner that the unbooked car has gone and how long it stayed (stayed_for in the event), then set_light off.
+6. When done, reply with one short sentence and no more tool calls.
 """
 
 
@@ -51,8 +52,14 @@ class Stats:
     reasoning_tokens: list[int] = field(default_factory=list)
     tool_calls: int = 0
     tool_errors: int = 0
+    alert_failures: int = 0
     offline_events: int = 0
     rounds_exhausted: int = 0
+
+
+def describe_duration(seconds: float) -> str:
+    minutes, rest = divmod(round(seconds), 60)
+    return f"{minutes} min {rest} s" if minutes else f"{rest} seconds"
 
 
 class Attendant:
@@ -65,6 +72,7 @@ class Attendant:
         masker: Masker,
         model: str = MODEL,
         max_rounds: int = MAX_ROUNDS,
+        min_charge_cents: int = DEFAULT_MIN_CHARGE_CENTS,
     ) -> None:
         self.client = client
         self.db = db
@@ -73,6 +81,7 @@ class Attendant:
         self.masker = masker
         self.model = model
         self.max_rounds = max_rounds
+        self.min_charge_cents = min_charge_cents
         self.stats = Stats()
 
     def handle(self, event: Event, snapshot: str, at: datetime) -> None:
@@ -81,7 +90,7 @@ class Attendant:
         self.masker.for_event(event.plate)
         say = self.masker.print
         context = EventContext(event.type, event.plate, at, snapshot, time.perf_counter())
-        toolbox = Toolbox(self.db, self.light, self.alerts, context)
+        toolbox = Toolbox(self.db, self.light, self.alerts, context, self.min_charge_cents)
         payload = {
             "event": event.type,
             "plate": event.plate,
@@ -90,7 +99,7 @@ class Attendant:
             "snapshot": snapshot,
         }
         if event.type == "LEFT":
-            payload["seen_for_seconds"] = round(event.last_seen - event.first_seen, 1)
+            payload["stayed_for"] = describe_duration(event.last_seen - event.first_seen)
         logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
         say(f"=== {event.type} {self.masker.label(event.plate)} at {iso(at)} ===")
 
@@ -138,6 +147,7 @@ class Attendant:
                 result = toolbox.call(name, arguments)
                 self.stats.tool_calls += 1
                 self.stats.tool_errors += "error" in result
+                self.stats.alert_failures += bool(result.get("delivery_error"))
                 self.db.log_action(logged_event, name, arguments, result)
                 say(f"  -> {json.dumps(result)}")
                 messages.append(
@@ -182,9 +192,13 @@ class Attendant:
         self.db.log_action(
             logged_event, "model", {"attempts": ATTEMPTS}, {"error": "offline: the model call failed twice"}
         )
-        self.alerts.send(Alert("owner", None, text, snapshot))
+        error = self.alerts.send(Alert("owner", None, text, snapshot))
+        self.stats.alert_failures += error is not None
         self.db.log_action(
-            logged_event, "send_alert", {"to": "owner", "message": text}, {"sent_to": "owner", "by": "code"}
+            logged_event,
+            "send_alert",
+            {"to": "owner", "message": text},
+            {"sent_to": "owner", "by": "code", "delivered": error is None, "delivery_error": error},
         )
 
     def _safe(self, err: Exception) -> str:
@@ -196,6 +210,7 @@ class Attendant:
         print(
             f"events handled: {s.events} | model calls: {s.model_calls} ({s.model_failures} failed)"
             f" | tool calls: {s.tool_calls} ({s.tool_errors} errors returned to the model)"
+            f" | alerts not delivered: {s.alert_failures}"
             f" | offline events: {s.offline_events} | rounds exhausted: {s.rounds_exhausted}"
         )
         if s.latencies:

@@ -1,4 +1,4 @@
-"""Settings for the watcher, with defaults that env vars or CLI flags override.
+"""Settings for the watcher and the attendant, with defaults that env vars or CLI flags override.
 
 Precedence, lowest first: the defaults below, SPOTTER_* environment variables
 (e.g. SPOTTER_LEAVE_AFTER_S=60), then command-line flags (e.g. --leave-after-s 60).
@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 
 ENV_PREFIX = "SPOTTER_"
+ALERT_KINDS = ("console", "telegram")
 
 Zone = tuple[float, float, float, float]
 
@@ -43,6 +44,13 @@ class Settings:
             "(4 suits the short test video; live use sets 60)"
         },
     )
+    alerts: str = field(
+        default="console",
+        metadata={"help": "where alerts go: console (prints) or telegram (your own chat)"},
+    )
+    min_charge_cents: int = field(
+        default=100, metadata={"help": "the smallest bill for a stay, in cents"}
+    )
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -59,6 +67,10 @@ class Settings:
             raise ValueError("arrive_reads must be at least 1")
         if self.arrive_window_s <= 0 or self.leave_after_s <= 0:
             raise ValueError("arrive_window_s and leave_after_s must be above 0")
+        if self.alerts not in ALERT_KINDS:
+            raise ValueError(f"alerts must be one of {', '.join(ALERT_KINDS)}, got {self.alerts!r}")
+        if self.min_charge_cents < 0:
+            raise ValueError("min_charge_cents must not be negative")
 
 
 def parse_zone(text: str) -> Zone:
@@ -77,6 +89,8 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "arrive_reads": int,
     "arrive_window_s": float,
     "leave_after_s": float,
+    "alerts": str.lower,
+    "min_charge_cents": int,
 }
 
 

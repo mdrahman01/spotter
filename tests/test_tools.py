@@ -3,10 +3,10 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from spotter.alerts import ConsoleAlerts
+from spotter.alerts import Alert, ConsoleAlerts
 from spotter.db import Database
 from spotter.light import ConsoleLight
-from spotter.tools import EventContext, Toolbox, bill_cents
+from spotter.tools import EventContext, Toolbox, bill_cents, public
 
 PLATE = "TEST123"
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -18,28 +18,37 @@ def quiet(line: str) -> None:
     pass
 
 
+class FailingAlerts:
+    """An alerts backend whose every send fails, as Telegram would without a network."""
+
+    def send(self, alert: Alert) -> str | None:
+        return "URLError: simulated outage"
+
+
 class Scene:
     """A database, the stand-ins and a toolbox bound to one event."""
 
-    def __init__(self, event_type="ARRIVED", plate=PLATE, at=T0, booked=True):
+    def __init__(self, event_type="ARRIVED", plate=PLATE, at=T0, booked=True, min_charge=0, alerts=None):
         self.db = Database(":memory:")
         if booked:
             self.booking_id = self.db.add_booking(
                 PLATE, "Dana Driver", T0 - timedelta(hours=1), T0 + timedelta(hours=11), RATE
             )
         self.light = ConsoleLight(say=quiet)
-        self.alerts = ConsoleAlerts(say=quiet)
+        self.alerts = alerts or ConsoleAlerts(say=quiet)
+        self.min_charge = min_charge
         self.tools = self.rebind(event_type, plate, at)
 
     def rebind(self, event_type, plate=PLATE, at=T0) -> Toolbox:
         """A toolbox for a later event on the same database."""
-        self.tools = Toolbox(self.db, self.light, self.alerts, EventContext(event_type, plate, at, SNAPSHOT))
+        context = EventContext(event_type, plate, at, SNAPSHOT)
+        self.tools = Toolbox(self.db, self.light, self.alerts, context, self.min_charge)
         return self.tools
 
 
 class BillArithmeticTest(unittest.TestCase):
-    def bill(self, seconds, rate=RATE):
-        return bill_cents(T0, T0 + timedelta(seconds=seconds), rate)
+    def bill(self, seconds, rate=RATE, min_charge=0):
+        return bill_cents(T0, T0 + timedelta(seconds=seconds), rate, min_charge)
 
     def test_one_minute_minimum(self):
         self.assertEqual(self.bill(0), (1, 9))
@@ -57,18 +66,32 @@ class BillArithmeticTest(unittest.TestCase):
         self.assertEqual(self.bill(3600, rate=1), (60, 1))
         self.assertEqual(self.bill(60, rate=0), (1, 0))
 
+    def test_minimum_charge(self):
+        self.assertEqual(self.bill(10, min_charge=100), (1, 100))  # 9 cents lifted to the minimum
+        self.assertEqual(self.bill(60 * 11, min_charge=100), (11, 100))  # 92 cents lifted
+        self.assertEqual(self.bill(60 * 13, min_charge=100), (13, 109))  # above it: untouched
+        self.assertEqual(self.bill(7200, min_charge=100), (120, 1000))
+        self.assertEqual(self.bill(60, rate=0, min_charge=100), (1, 100))
+
     def test_clock_going_backwards_is_billed_as_one_minute(self):
         self.assertEqual(bill_cents(T0, T0 - timedelta(minutes=5), RATE), (1, 9))
 
 
 class ToolRulesTest(unittest.TestCase):
     def test_lookup_reports_active_outside_window_and_no_booking(self):
-        self.assertEqual(Scene().tools.lookup_booking(PLATE)["status"], "active")
+        active = Scene().tools.lookup_booking(PLATE)
+        self.assertEqual(active["status"], "active")
+        self.assertEqual(active["booking"]["rate"], "$5.00/hour")
+        self.assertNotIn("plate", active["booking"])
         late = Scene(at=T0 + timedelta(hours=20)).tools.lookup_booking(PLATE)
         self.assertEqual(late["status"], "outside_window")
         self.assertEqual(late["booking"]["driver"], "Dana Driver")
         none = Scene(booked=False).tools.lookup_booking(PLATE)
         self.assertEqual((none["status"], none["booking"]), ("no_booking", None))
+
+    def test_money_is_shown_in_dollars(self):
+        booking = {"id": 1, "driver": "D", "starts_at": "s", "ends_at": "e", "rate_cents_per_hour": 1250, "plate": PLATE}
+        self.assertEqual(public(booking)["rate"], "$12.50/hour")
 
     def test_tools_act_only_on_the_events_plate(self):
         scene = Scene()
@@ -110,6 +133,8 @@ class ToolRulesTest(unittest.TestCase):
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
         self.assertEqual((bill["minutes"], bill["amount_cents"], bill["amount"]), (1, 9, "$0.09"))
+        self.assertEqual(bill["rate"], "$5.00/hour")
+        self.assertNotIn("rate_cents_per_hour", bill)
         self.assertEqual(scene.db.session(1)["amount_cents"], 9)
         # A stay of another plate cannot be billed from this event.
         other = scene.db.add_booking("OTHER99", "Ola", T0 - timedelta(hours=1), T0 + timedelta(hours=1), RATE)
@@ -117,11 +142,21 @@ class ToolRulesTest(unittest.TestCase):
         scene.db.close_session(other_session, T0 + timedelta(minutes=2))
         self.assertIn("error", scene.tools.compute_bill(other_session))
 
-    def test_compute_bill_accepts_a_numeric_string(self):
-        scene = Scene()
+    def test_compute_bill_applies_the_minimum_charge(self):
+        scene = Scene(min_charge=100)
+        scene.tools.start_session(PLATE)
+        scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
+        bill = scene.tools.compute_bill(1)
+        self.assertEqual((bill["amount_cents"], bill["amount"], bill["minimum_charge"]), (100, "$1.00", "$1.00"))
+        self.assertTrue(bill["minimum_charge_applied"])
+        self.assertEqual(scene.db.session(1)["amount_cents"], 100)
+
+    def test_compute_bill_above_the_minimum_is_untouched(self):
+        scene = Scene(min_charge=100)
         scene.tools.start_session(PLATE)
         scene.rebind("LEFT", at=T0 + timedelta(minutes=61)).end_session(PLATE)
-        self.assertEqual(scene.tools.compute_bill("1")["amount_cents"], 509)
+        bill = scene.tools.compute_bill("1")  # a numeric string is accepted
+        self.assertEqual((bill["amount_cents"], bill["minimum_charge_applied"]), (509, False))
 
     def test_set_light(self):
         scene = Scene()
@@ -139,7 +174,10 @@ class ToolRulesTest(unittest.TestCase):
         self.assertIn("error", scene.tools.send_alert("owner", "   "))
         self.assertEqual(scene.alerts.sent, [])
         owner = scene.tools.send_alert("owner", "Unknown car in the driveway.")
-        self.assertEqual(owner, {"sent_to": "owner", "name": None, "snapshot": SNAPSHOT})
+        self.assertEqual(
+            owner,
+            {"sent_to": "owner", "name": None, "snapshot": SNAPSHOT, "delivered": True, "delivery_error": None},
+        )
         driver = scene.tools.send_alert("driver", "Welcome.")
         self.assertEqual(driver["name"], "Dana Driver")
         self.assertEqual([(a.to, a.name, a.snapshot) for a in scene.alerts.sent],
@@ -147,6 +185,12 @@ class ToolRulesTest(unittest.TestCase):
 
     def test_no_driver_to_alert_without_a_booking(self):
         self.assertIn("error", Scene(booked=False).tools.send_alert("driver", "Welcome."))
+
+    def test_a_failed_delivery_is_reported_not_raised(self):
+        scene = Scene(alerts=FailingAlerts())
+        result = scene.tools.send_alert("owner", "Unknown car.")
+        self.assertNotIn("error", result)
+        self.assertEqual((result["delivered"], result["delivery_error"]), (False, "URLError: simulated outage"))
 
     def test_call_never_raises(self):
         scene = Scene()

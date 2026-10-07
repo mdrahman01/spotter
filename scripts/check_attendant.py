@@ -4,12 +4,13 @@
     .venv/bin/python scripts/check_attendant.py unknown
 
 Reads data/spotter.db: the sessions table, and the set_light and send_alert
-calls recorded in action_log. Prints no plate text and no alert messages.
+calls recorded in action_log. Only delivered alerts count. Prints no plate text
+and no alert messages.
 
-booked passes if there is exactly one session, closed, billed at least one
-minute; the light went green then off; and the driver got two alerts.
+booked passes if there is exactly one session, closed, billed at least the
+minimum charge; the light went green then off; and the driver got two alerts.
 unknown passes if there are no sessions and no bill; the light went red then
-off; and the owner got an alert on arrival.
+off; and the owner got two alerts, on arrival and then on leaving.
 """
 
 import json
@@ -18,9 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from spotter import config  # noqa: E402
 from spotter.db import Database  # noqa: E402
-from spotter.tools import bill_cents  # noqa: E402
-from spotter.db import parse  # noqa: E402
 
 EXPECTED_LIGHTS = {"booked": ["green", "off"], "unknown": ["red", "off"]}
 
@@ -30,11 +30,12 @@ def main() -> int:
         print("usage: check_attendant.py booked|unknown", file=sys.stderr)
         return 2
     scenario = sys.argv[1]
+    min_charge = config.load({}).min_charge_cents
     db = Database()
     sessions = db.sessions()
     actions = db.actions()
 
-    lights, alerts, errors, model_problems = [], [], [], []
+    lights, alerts, undelivered, errors, model_problems = [], [], [], [], []
     for action in actions:
         event_type = json.loads(action["event"])["type"]
         result = json.loads(action["result"])
@@ -50,7 +51,10 @@ def main() -> int:
         if action["tool"] == "set_light":
             lights.append(arguments.get("color"))
         elif action["tool"] == "send_alert":
-            alerts.append((arguments.get("to"), event_type))
+            if result.get("delivery_error"):
+                undelivered.append((arguments.get("to"), event_type, result["delivery_error"]))
+            else:
+                alerts.append((arguments.get("to"), event_type))
 
     print("sessions:")
     for s in sessions:
@@ -61,7 +65,8 @@ def main() -> int:
     if not sessions:
         print("  none")
     print(f"light changes, in order: {lights or 'none'}")
-    print(f"alerts (to, during event): {alerts or 'none'}")
+    print(f"alerts delivered (to, during event): {alerts or 'none'}")
+    print(f"alerts not delivered: {undelivered or 'none'}")
     print(f"tool errors returned to the model: {errors or 'none'}")
     print(f"model problems: {model_problems or 'none'}")
 
@@ -75,12 +80,10 @@ def main() -> int:
             s = sessions[0]
             if s["status"] != "closed" or not s["left_at"]:
                 failures.append("the session is not closed")
-            booking = db.booking(s["booking_id"])
-            one_minute = bill_cents(parse(s["arrived_at"]), parse(s["arrived_at"]), booking["rate_cents_per_hour"])[1]
             if s["amount_cents"] is None:
                 failures.append("no bill was computed")
-            elif s["amount_cents"] < one_minute:
-                failures.append(f"bill {s['amount_cents']} cents is below one minute ({one_minute} cents)")
+            elif s["amount_cents"] < min_charge:
+                failures.append(f"bill {s['amount_cents']} cents is below the minimum charge ({min_charge})")
         driver_alerts = sum(1 for to, _ in alerts if to == "driver")
         if driver_alerts != 2:
             failures.append(f"the driver got {driver_alerts} alerts instead of 2")
@@ -89,8 +92,9 @@ def main() -> int:
             failures.append(f"{len(sessions)} sessions instead of none")
         if any(s["amount_cents"] is not None for s in sessions):
             failures.append("a bill was computed")
-        if not any(to == "owner" and event == "ARRIVED" for to, event in alerts):
-            failures.append("the owner got no alert on arrival")
+        owner_events = [event for to, event in alerts if to == "owner"]
+        if owner_events != ["ARRIVED", "LEFT"]:
+            failures.append(f"owner alerts during {owner_events} instead of ['ARRIVED', 'LEFT']")
 
     if failures:
         print("FAIL: " + "; ".join(failures))
