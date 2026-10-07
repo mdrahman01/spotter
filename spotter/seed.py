@@ -1,6 +1,8 @@
 """Add a booking that starts now, or empty the database.
 
     python -m spotter.seed --plate PLATE --driver NAME --hours 12 --rate 5.00
+    python -m spotter.seed --plate PLATE --driver NAME --rate 5.00 \
+        --starts-at 2026-10-07T03:00:00+00:00 --ends-at 2026-10-07T03:01:12+00:00
     python -m spotter.seed --reset
 
 With --reset and a plate, the database is emptied first and the booking added
@@ -9,7 +11,7 @@ after. The plate is taken from the command line and is not printed.
 
 import argparse
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from spotter.db import Database, iso, now
@@ -23,6 +25,15 @@ def dollars_to_cents(text: str) -> int:
         raise argparse.ArgumentTypeError(f"not an amount: {text!r}") from None
 
 
+def parse_time(text: str) -> datetime:
+    """An ISO 8601 time; one without a zone is taken as UTC."""
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an ISO 8601 time: {text!r}") from None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m spotter.seed",
@@ -34,6 +45,12 @@ def main() -> int:
     parser.add_argument(
         "--rate", type=dollars_to_cents, default="5.00", metavar="DOLLARS",
         help="dollars per hour (default 5.00)",
+    )
+    parser.add_argument(
+        "--starts-at", type=parse_time, metavar="ISO_TIME", help="booking start (default: now)"
+    )
+    parser.add_argument(
+        "--ends-at", type=parse_time, metavar="ISO_TIME", help="booking end (default: start plus --hours)"
     )
     parser.add_argument("--reset", action="store_true", help="empty the database first")
     args = parser.parse_args()
@@ -52,13 +69,14 @@ def main() -> int:
         plate = normalize(args.plate)
         if not plate:
             parser.error("--plate needs at least one letter or digit")
-        starts_at = now()
-        ends_at = starts_at + timedelta(hours=args.hours)
+        starts_at = args.starts_at or now()
+        ends_at = args.ends_at or starts_at + timedelta(hours=args.hours)
+        if ends_at <= starts_at:
+            parser.error("--ends-at must be after the start")
         booking_id = db.add_booking(plate, args.driver, starts_at, ends_at, args.rate)
         print(
             f"booking #{booking_id} added for the plate given on the command line:"
-            f" {args.driver}, {args.hours:g}h from {iso(starts_at)} to {iso(ends_at)},"
-            f" {args.rate} cents/hour"
+            f" {args.driver}, from {iso(starts_at)} to {iso(ends_at)}, {args.rate} cents/hour"
         )
     return 0
 

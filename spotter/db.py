@@ -24,7 +24,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     arrived_at TEXT NOT NULL,
     left_at TEXT,
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
-    amount_cents INTEGER
+    amount_cents INTEGER,
+    ending_soon_at TEXT,
+    overstayed_at TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_session_per_plate
     ON sessions (plate) WHERE status = 'open';
@@ -60,6 +62,12 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        # Databases created before the timer events lack these two columns.
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        for column in ("ending_soon_at", "overstayed_at"):
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
+        self.conn.commit()
 
     def reset(self) -> None:
         """Empty every table."""
@@ -108,6 +116,9 @@ class Database:
     def open_session(self, plate: str) -> dict | None:
         return self._one("SELECT * FROM sessions WHERE plate = ? AND status = 'open'", plate)
 
+    def open_sessions(self) -> list[dict]:
+        return self._all("SELECT * FROM sessions WHERE status = 'open' ORDER BY id")
+
     def session(self, session_id: int) -> dict | None:
         return self._one("SELECT * FROM sessions WHERE id = ?", session_id)
 
@@ -129,6 +140,20 @@ class Database:
             self.conn.execute(
                 "UPDATE sessions SET left_at = ?, status = 'closed' WHERE id = ?",
                 (iso(left_at), session_id),
+            )
+
+    def mark_ending_soon(self, session_id: int, at: datetime) -> None:
+        """Record that the ending-soon warning was raised, so it is raised once."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sessions SET ending_soon_at = ? WHERE id = ?", (iso(at), session_id)
+            )
+
+    def mark_overstayed(self, session_id: int, at: datetime) -> None:
+        """Record that the stay overstayed its booking; compute_bill then adds the fee."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sessions SET overstayed_at = ? WHERE id = ?", (iso(at), session_id)
             )
 
     def set_amount(self, session_id: int, amount_cents: int) -> None:

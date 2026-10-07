@@ -54,16 +54,21 @@ EPSILON = 1e-6
 EventHandler = Callable[[Event, str, datetime], None]
 """Called with each event, its snapshot path, and its real (wall-clock) time."""
 
+TimerCheck = Callable[[float, datetime], list[Event]]
+"""Called on every processed frame with the stream time and the real time; returns
+timer events (ENDING_SOON, OVERSTAY) to log and handle like the rule's own."""
+
 
 class Clock:
     """Event times in seconds: video time for a file, wall-clock time for a live stream."""
 
-    def __init__(self, live: bool, fps: float, name: str) -> None:
+    def __init__(self, live: bool, fps: float, name: str, base_time: datetime | None = None) -> None:
         self.live = live
         self.fps = fps
         self.name = name
-        # For a file, video time is added to this to get real timestamps.
-        self.run_started = datetime.now(timezone.utc)
+        # For a file, video time is added to this to get real timestamps: the
+        # moment the run started, unless a replay fixes video second 0 elsewhere.
+        self.run_started = base_time or datetime.now(timezone.utc)
 
     def now(self, frame_index: int) -> float:
         return time.time() if self.live else frame_index / self.fps
@@ -137,13 +142,21 @@ def log_event(event: Event, snapshot: str, clock: Clock, masker: Masker) -> None
     )
 
 
-def run(settings: Settings, masker: Masker, handler: EventHandler | None = None) -> Summary:
+def run(
+    settings: Settings,
+    masker: Masker,
+    handler: EventHandler | None = None,
+    timers: TimerCheck | None = None,
+    base_time: datetime | None = None,
+) -> Summary:
     """Replay a file or follow a live stream to its end, and return the counts.
 
     Prints the source, the settings and one line per event. Each event also
     goes to the handler, if given, as soon as it happens, with its snapshot
     path and real time. The watcher waits for the handler to return, which for
-    a file replay just pauses the video.
+    a file replay just pauses the video. After the rule's events of a frame,
+    `timers` is asked for timer events, which are logged and handled the same
+    way. `base_time` fixes the real time of video second 0 for a file replay.
 
     Raises FileNotFoundError or RuntimeError if the source cannot be opened.
     """
@@ -159,7 +172,7 @@ def run(settings: Settings, masker: Masker, handler: EventHandler | None = None)
         raise RuntimeError(f"{source} reports no frame rate")
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    clock = Clock(live, fps, Path(source).stem)
+    clock = Clock(live, fps, Path(source).stem, None if live else base_time)
     summary = Summary(live, fps)
 
     if live:
@@ -177,6 +190,8 @@ def run(settings: Settings, masker: Masker, handler: EventHandler | None = None)
         f" | arrive: {settings.arrive_reads} reads within {settings.arrive_window_s}s"
         f" | leave: {settings.leave_after_s}s unread"
     )
+    if not live and base_time is not None:
+        print(f"replay: video second 0 is {clock.run_started.isoformat(timespec='seconds')}")
     if masker.expected:
         print("--expect given: event lines say MINE or OTHER")
 
@@ -202,15 +217,26 @@ def run(settings: Settings, masker: Masker, handler: EventHandler | None = None)
             mine = sum(read.text == masker.expected for read in reads)
             summary.reads_mine += mine
             summary.reads_other += len(reads) - mine
+            snapshot = None
+
+            def dispatch(events: list[Event]) -> None:
+                nonlocal snapshot
+                if snapshot is None:
+                    snapshot = save_snapshot(frame, clock.snapshot_name(now))
+                for event in events:
+                    log_event(event, snapshot, clock, masker)
+                    summary.events[event.type] += 1
+                    if handler is not None:
+                        handler(event, snapshot, clock.real_time(event.time))
+
             events = rule.update(now, [read.text for read in reads])
-            if not events:
-                continue
-            snapshot = save_snapshot(frame, clock.snapshot_name(now))
-            for event in events:
-                log_event(event, snapshot, clock, masker)
-                summary.events[event.type] += 1
-                if handler is not None:
-                    handler(event, snapshot, clock.real_time(event.time))
+            if events:
+                dispatch(events)
+            if timers is not None:
+                # After the rule's events, so a LEFT closes the stay before the timer looks.
+                timer_events = timers(now, clock.real_time(now))
+                if timer_events:
+                    dispatch(timer_events)
     except KeyboardInterrupt:
         print("stopped by Ctrl+C")
     finally:
@@ -237,15 +263,14 @@ def print_summary(summary: Summary, masker: Masker) -> None:
     else:
         print(f"reads of my plate: {summary.reads_mine}")
         print(f"reads of other text: {summary.reads_other}")
-    print(
-        f"events: {summary.events.total()} "
-        f"({summary.events['ARRIVED']} ARRIVED, {summary.events['LEFT']} LEFT)"
-    )
+    counts = ", ".join(f"{count} {kind}" for kind, count in summary.events.items())
+    print(f"events: {summary.events.total()}" + (f" ({counts})" if counts else ""))
     print(f"still present at the end: {', '.join(summary.still_present) or 'none'}")
 
 
-def parse_args(parser: argparse.ArgumentParser) -> tuple[Settings, Masker]:
-    """Shared by spotter.watch and spotter.run: settings plus the --expect masker."""
+def parse_args(parser: argparse.ArgumentParser) -> tuple[Settings, Masker, argparse.Namespace]:
+    """Shared by spotter.watch and spotter.run: settings, the --expect masker, and the
+    parsed arguments for any flags the caller added to the parser first."""
     config.add_arguments(parser)
     parser.add_argument(
         "--expect",
@@ -266,7 +291,7 @@ def parse_args(parser: argparse.ArgumentParser) -> tuple[Settings, Masker]:
         expected = normalize(args.expect)
         if not expected:
             parser.error("--expect needs at least one letter or digit")
-    return settings, Masker(expected)
+    return settings, Masker(expected), args
 
 
 def main() -> int:
@@ -275,7 +300,7 @@ def main() -> int:
         prog="python -m spotter.watch",
         description="Turn a video file or live stream into ARRIVED and LEFT events.",
     )
-    settings, masker = parse_args(parser)
+    settings, masker, _ = parse_args(parser)
     try:
         summary = run(settings, masker)
     except (FileNotFoundError, RuntimeError) as err:

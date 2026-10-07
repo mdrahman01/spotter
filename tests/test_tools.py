@@ -28,7 +28,8 @@ class FailingAlerts:
 class Scene:
     """A database, the stand-ins and a toolbox bound to one event."""
 
-    def __init__(self, event_type="ARRIVED", plate=PLATE, at=T0, booked=True, min_charge=0, alerts=None):
+    def __init__(self, event_type="ARRIVED", plate=PLATE, at=T0, booked=True, min_charge=0, alerts=None,
+                 overstay_fee=500):
         self.db = Database(":memory:")
         if booked:
             self.booking_id = self.db.add_booking(
@@ -37,12 +38,13 @@ class Scene:
         self.light = ConsoleLight(say=quiet)
         self.alerts = alerts or ConsoleAlerts(say=quiet)
         self.min_charge = min_charge
+        self.overstay_fee = overstay_fee
         self.tools = self.rebind(event_type, plate, at)
 
     def rebind(self, event_type, plate=PLATE, at=T0) -> Toolbox:
         """A toolbox for a later event on the same database."""
         context = EventContext(event_type, plate, at, SNAPSHOT)
-        self.tools = Toolbox(self.db, self.light, self.alerts, context, self.min_charge)
+        self.tools = Toolbox(self.db, self.light, self.alerts, context, self.min_charge, self.overstay_fee)
         return self.tools
 
 
@@ -106,6 +108,9 @@ class ToolRulesTest(unittest.TestCase):
         scene = Scene()
         first = scene.tools.start_session(PLATE)
         self.assertEqual((first["session_id"], first["status"], first["driver"]), (1, "open", "Dana Driver"))
+        open_stay = scene.tools.lookup_booking(PLATE)["open_session"]
+        self.assertEqual(open_stay, {"session_id": 1, "arrived_at": "2026-01-01T12:00:00+00:00",
+                                     "ending_soon_warned": False, "overstayed": False})
         second = scene.tools.start_session(PLATE)
         self.assertIn("error", second)
         self.assertIn("session_id 1", second["error"])
@@ -132,7 +137,8 @@ class ToolRulesTest(unittest.TestCase):
         self.assertIn("error", scene.tools.compute_bill(1))  # still open
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
-        self.assertEqual((bill["minutes"], bill["amount_cents"], bill["amount"]), (1, 9, "$0.09"))
+        self.assertEqual((bill["minutes"], bill["amount_cents"], bill["total"]), (1, 9, "$0.09"))
+        self.assertEqual((bill["parking"], bill["overstay_fee"], bill["overstayed"]), ("$0.09", "$0.00", False))
         self.assertEqual(bill["rate"], "$5.00/hour")
         self.assertNotIn("rate_cents_per_hour", bill)
         self.assertEqual(scene.db.session(1)["amount_cents"], 9)
@@ -147,9 +153,29 @@ class ToolRulesTest(unittest.TestCase):
         scene.tools.start_session(PLATE)
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
-        self.assertEqual((bill["amount_cents"], bill["amount"], bill["minimum_charge"]), (100, "$1.00", "$1.00"))
+        self.assertEqual((bill["amount_cents"], bill["total"], bill["minimum_charge"]), (100, "$1.00", "$1.00"))
         self.assertTrue(bill["minimum_charge_applied"])
         self.assertEqual(scene.db.session(1)["amount_cents"], 100)
+
+    def test_an_overstayed_stay_pays_the_fee_on_top_of_the_minimum_charge(self):
+        scene = Scene(min_charge=100)
+        scene.tools.start_session(PLATE)
+        scene.db.mark_overstayed(1, T0 + timedelta(seconds=15))
+        scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
+        bill = scene.tools.compute_bill(1)
+        self.assertEqual(
+            (bill["parking"], bill["overstay_fee"], bill["total"], bill["amount_cents"], bill["overstayed"]),
+            ("$1.00", "$5.00", "$6.00", 600, True),
+        )
+        self.assertEqual(scene.db.session(1)["amount_cents"], 600)
+
+    def test_the_overstay_fee_is_a_setting(self):
+        scene = Scene(min_charge=0, overstay_fee=250)
+        scene.tools.start_session(PLATE)
+        scene.db.mark_overstayed(1, T0 + timedelta(hours=2))
+        scene.rebind("LEFT", at=T0 + timedelta(hours=2, minutes=1)).end_session(PLATE)
+        bill = scene.tools.compute_bill(1)
+        self.assertEqual((bill["parking"], bill["overstay_fee"], bill["total"]), ("$10.09", "$2.50", "$12.59"))
 
     def test_compute_bill_above_the_minimum_is_untouched(self):
         scene = Scene(min_charge=100)
@@ -165,8 +191,10 @@ class ToolRulesTest(unittest.TestCase):
         result = scene.tools.set_light("GREEN")
         self.assertEqual(result["light"], "green")
         self.assertIsInstance(result["seconds_after_event"], float)
+        scene.tools.set_light("amber")
         scene.tools.set_light("off")
-        self.assertEqual(scene.light.history, ["green", "off"])
+        self.assertEqual(scene.light.history, ["green", "amber", "off"])
+        self.assertEqual(scene.tools.lookup_booking(PLATE)["open_session"], None)
 
     def test_send_alert_attaches_the_snapshot_and_knows_the_driver(self):
         scene = Scene()

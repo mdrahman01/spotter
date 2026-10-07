@@ -4,7 +4,8 @@ The code, not the model, enforces the rules and does the arithmetic:
 - a tool acts only on the plate of the current event;
 - a plate has one open stay at a time, and a stay needs a booking covering its start;
 - the bill is per started minute at the booking's rate, with a one-minute
-  minimum, rounded up to whole cents, and never below the minimum charge.
+  minimum, rounded up to whole cents, and never below the minimum charge; an
+  overstayed stay pays a flat overstay fee on top.
 A broken rule comes back to the model as {"error": ...}; nothing raises. Error
 messages never contain plate text, so they can be printed as they are. Money
 is shown to the model as dollars ("$5.00/hour"), never as cents.
@@ -23,6 +24,7 @@ from spotter.reader import normalize
 
 PLATE_RULE = "this tool may only act on the plate in the current event"
 DEFAULT_MIN_CHARGE_CENTS = 100
+DEFAULT_OVERSTAY_FEE_CENTS = 500
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,8 @@ TOOL_SCHEMAS = [
     _tool("end_session", "End the open stay of the plate.", PLATE_PARAM, ["plate"]),
     _tool(
         "compute_bill",
-        "Compute and record the bill for an ended stay. Returns the amount and the rate as dollars.",
+        "Compute and record the bill for an ended stay. Returns the breakdown in dollars: "
+        "parking, overstay fee and total.",
         {"session_id": {"type": "integer", "description": "The stay's session_id."}},
         ["session_id"],
     ),
@@ -131,12 +134,14 @@ class Toolbox:
         alerts: Alerts,
         event: EventContext,
         min_charge_cents: int = DEFAULT_MIN_CHARGE_CENTS,
+        overstay_fee_cents: int = DEFAULT_OVERSTAY_FEE_CENTS,
     ) -> None:
         self.db = db
         self.light = light
         self.alerts = alerts
         self.event = event
         self.min_charge_cents = min_charge_cents
+        self.overstay_fee_cents = overstay_fee_cents
 
     def call(self, name: str, arguments: str) -> dict:
         """Run one tool call as the model made it. Always returns a dict."""
@@ -162,7 +167,14 @@ class Toolbox:
 
     def _open_stay(self) -> dict | None:
         stay = self.db.open_session(self.event.plate)
-        return {"session_id": stay["id"], "arrived_at": stay["arrived_at"]} if stay else None
+        if stay is None:
+            return None
+        return {
+            "session_id": stay["id"],
+            "arrived_at": stay["arrived_at"],
+            "ending_soon_warned": bool(stay["ending_soon_at"]),
+            "overstayed": bool(stay["overstayed_at"]),
+        }
 
     def lookup_booking(self, plate: str) -> dict:
         if error := self._plate_error(plate):
@@ -224,23 +236,24 @@ class Toolbox:
         if session["status"] != "closed":
             return {"error": "the stay is still open; end it before billing"}
         booking = self.db.booking(session["booking_id"])
-        minutes, amount = bill_cents(
-            parse(session["arrived_at"]),
-            parse(session["left_at"]),
-            booking["rate_cents_per_hour"],
-            self.min_charge_cents,
-        )
-        self.db.set_amount(session_id, amount)
+        arrived_at, left_at = parse(session["arrived_at"]), parse(session["left_at"])
+        rate = booking["rate_cents_per_hour"]
+        minutes, parking = bill_cents(arrived_at, left_at, rate, self.min_charge_cents)
+        overstayed = bool(session["overstayed_at"])
+        fee = self.overstay_fee_cents if overstayed else 0
+        total = parking + fee
+        self.db.set_amount(session_id, total)
         return {
             "session_id": session_id,
             "minutes": minutes,
-            "rate": rate_text(booking["rate_cents_per_hour"]),
-            "amount_cents": amount,
-            "amount": dollars(amount),
+            "rate": rate_text(rate),
+            "parking": dollars(parking),
             "minimum_charge": dollars(self.min_charge_cents),
-            "minimum_charge_applied": amount == self.min_charge_cents
-            and bill_cents(parse(session["arrived_at"]), parse(session["left_at"]), booking["rate_cents_per_hour"])[1]
-            < self.min_charge_cents,
+            "minimum_charge_applied": bill_cents(arrived_at, left_at, rate)[1] < self.min_charge_cents,
+            "overstayed": overstayed,
+            "overstay_fee": dollars(fee),
+            "total": dollars(total),
+            "amount_cents": total,
         }
 
     def set_light(self, color: str) -> dict:

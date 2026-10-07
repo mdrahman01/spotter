@@ -51,6 +51,17 @@ class Settings:
     min_charge_cents: int = field(
         default=100, metadata={"help": "the smallest bill for a stay, in cents"}
     )
+    ending_soon_s: float = field(
+        default=600,
+        metadata={"help": "warn the driver when the booking ends within this many seconds"},
+    )
+    overstay_grace_s: float = field(
+        default=300,
+        metadata={"help": "a stay counts as overstayed this many seconds after its booking ends"},
+    )
+    overstay_fee_cents: int = field(
+        default=500, metadata={"help": "flat fee added to an overstayed stay, in cents"}
+    )
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -71,6 +82,8 @@ class Settings:
             raise ValueError(f"alerts must be one of {', '.join(ALERT_KINDS)}, got {self.alerts!r}")
         if self.min_charge_cents < 0:
             raise ValueError("min_charge_cents must not be negative")
+        if self.ending_soon_s < 0 or self.overstay_grace_s < 0 or self.overstay_fee_cents < 0:
+            raise ValueError("ending_soon_s, overstay_grace_s and overstay_fee_cents must not be negative")
 
 
 def parse_zone(text: str) -> Zone:
@@ -91,6 +104,9 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "leave_after_s": float,
     "alerts": str.lower,
     "min_charge_cents": int,
+    "ending_soon_s": float,
+    "overstay_grace_s": float,
+    "overstay_fee_cents": int,
 }
 
 

@@ -207,3 +207,33 @@ alerts delivered.
   unbooked car, both on arrival and on leaving.
 - Nothing it got wrong. It puts the plate text in alert messages, which is
   right for the owner and is masked in printed output by --expect.
+
+## 2026-10-06 — Week 3: overstay warning, fee and owner alert
+
+Two timer events now come from the watcher's clock: ENDING_SOON when the
+booking ends within ending_soon_s, OVERSTAY once the car is still there
+overstay_grace_s after the end, each once per stay. The code marks the stay
+overstayed and adds a flat fee to the bill; the model only tells people. The
+overstay scenario on the 30 s video (booking ending 12 s in, warning at 4 s,
+grace 3 s) gave ARRIVED 6.6 s, ENDING_SOON 8.0 s, OVERSTAY 15.0 s, LEFT 26.2 s,
+and a $6.00 bill ($1.00 parking at the minimum charge plus the $5.00 fee).
+Overstay (Telegram alerts), booked and unknown (console alerts) all passed on
+the first run.
+
+**Nemotron notes**
+
+- 34 model calls across the three scenarios, 0.29 to 0.65 s each, zero
+  reasoning tokens throughout; prompt size now 1.4k to 2.1k tokens with eight
+  rules and six tools. From OVERSTAY to the amber light: 1.0 s.
+- On OVERSTAY it made three tool calls in one round (amber light, driver
+  alert, owner alert), its most parallel round so far, and the bill alert
+  after an overstay gave the breakdown exactly as asked.
+- What it got wrong, all wording, no wrong tool call: the final sentence for a
+  booked car's LEFT twice called it "the unbooked car" (the stayed_for field
+  and the unbooked-car rule sit next to each other in its context); the bill
+  alert for the plain booked stay gave a breakdown with a $0.00 fee although
+  the rule asks for one only when a fee applied; and with 4 s left it said the
+  booking "ends in 1 minute", which is the minutes_left=1 we handed it.
+- One run of three ended with a native crash at interpreter exit (libc++
+  "recursive_mutex lock failed", exit -6) after all output and the database
+  writes were complete; it is from the ONNX/OpenCV teardown, not the model.

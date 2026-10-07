@@ -8,6 +8,7 @@ alerted that the attendant is offline.
 """
 
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,11 +16,18 @@ from datetime import datetime
 from openai import OpenAI
 
 from spotter.alerts import Alert, Alerts
-from spotter.db import Database, iso
+from spotter.db import Database, iso, parse
 from spotter.events import Event
 from spotter.light import Light
 from spotter.privacy import Masker
-from spotter.tools import DEFAULT_MIN_CHARGE_CENTS, TOOL_SCHEMAS, EventContext, Toolbox
+from spotter.tools import (
+    DEFAULT_MIN_CHARGE_CENTS,
+    DEFAULT_OVERSTAY_FEE_CENTS,
+    TOOL_SCHEMAS,
+    EventContext,
+    Toolbox,
+    dollars,
+)
 
 BASE_URL = "https://api.tokenfactory.nebius.com/v1/"
 MODEL = "nvidia/Nemotron-3_5-Lightning"
@@ -28,7 +36,7 @@ ATTEMPTS = 2  # tries per model call before the attendant counts as offline
 
 SYSTEM_PROMPT = """\
 You are Spotter, the automated attendant for one private driveway.
-Each user message is one event, ARRIVED or LEFT, for one licence plate, as JSON.
+Each user message is one event (ARRIVED, ENDING_SOON, OVERSTAY or LEFT) for one licence plate, as JSON.
 You act only through the tools. The code behind them enforces the rules and does
 all arithmetic; a tool that returns {"error": ...} did nothing.
 
@@ -36,9 +44,11 @@ Rules:
 1. Always call lookup_booking first. Never assume a booking.
 2. ARRIVED with a booking whose status is "active": start_session, set_light green, send_alert to the driver.
 3. ARRIVED with anything else (no booking, or outside its window): set_light red, then send_alert to the owner saying that an unbooked car is in the spot and that a photo is attached. Do not suggest contacting the driver.
-4. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, then set_light off.
-5. LEFT with no open stay: send_alert to the owner that the unbooked car has gone and how long it stayed (stayed_for in the event), then set_light off.
-6. When done, reply with one short sentence and no more tool calls.
+4. ENDING_SOON: send_alert to the driver saying how many minutes are left (minutes_left in the event).
+5. OVERSTAY: set_light amber, send_alert to the driver that the booking has ended and an overstay fee now applies, and send_alert to the owner that the car is overstaying.
+6. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when a fee applied, then set_light off.
+7. LEFT with no open stay: send_alert to the owner that the unbooked car has gone and how long it stayed (stayed_for in the event), then set_light off.
+8. When done, reply with one short sentence and no more tool calls.
 """
 
 
@@ -73,6 +83,7 @@ class Attendant:
         model: str = MODEL,
         max_rounds: int = MAX_ROUNDS,
         min_charge_cents: int = DEFAULT_MIN_CHARGE_CENTS,
+        overstay_fee_cents: int = DEFAULT_OVERSTAY_FEE_CENTS,
     ) -> None:
         self.client = client
         self.db = db
@@ -82,6 +93,7 @@ class Attendant:
         self.model = model
         self.max_rounds = max_rounds
         self.min_charge_cents = min_charge_cents
+        self.overstay_fee_cents = overstay_fee_cents
         self.stats = Stats()
 
     def handle(self, event: Event, snapshot: str, at: datetime) -> None:
@@ -90,7 +102,9 @@ class Attendant:
         self.masker.for_event(event.plate)
         say = self.masker.print
         context = EventContext(event.type, event.plate, at, snapshot, time.perf_counter())
-        toolbox = Toolbox(self.db, self.light, self.alerts, context, self.min_charge_cents)
+        toolbox = Toolbox(
+            self.db, self.light, self.alerts, context, self.min_charge_cents, self.overstay_fee_cents
+        )
         payload = {
             "event": event.type,
             "plate": event.plate,
@@ -100,6 +114,8 @@ class Attendant:
         }
         if event.type == "LEFT":
             payload["stayed_for"] = describe_duration(event.last_seen - event.first_seen)
+        elif event.type in ("ENDING_SOON", "OVERSTAY"):
+            payload.update(self._booking_timing(event.plate, at, event.type))
         logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
         say(f"=== {event.type} {self.masker.label(event.plate)} at {iso(at)} ===")
 
@@ -159,6 +175,23 @@ class Attendant:
         self.db.log_action(
             logged_event, "model", {"rounds": self.max_rounds}, {"error": "stopped: too many rounds"}
         )
+
+    def _booking_timing(self, plate: str, at: datetime, kind: str) -> dict:
+        """What a timer event needs the model to know: when the booking ends, and by how much."""
+        stay = self.db.open_session(plate)
+        booking = self.db.booking(stay["booking_id"]) if stay else None
+        if booking is None:
+            return {}
+        ends_at = parse(booking["ends_at"])
+        timing = {"session_id": stay["id"], "booking_ends_at": booking["ends_at"]}
+        if kind == "ENDING_SOON":
+            seconds_left = max(0.0, (ends_at - at).total_seconds())
+            timing["minutes_left"] = math.ceil(seconds_left / 60)
+            timing["seconds_left"] = round(seconds_left)
+        else:
+            timing["ended_ago"] = describe_duration((at - ends_at).total_seconds())
+            timing["overstay_fee"] = dollars(self.overstay_fee_cents)
+        return timing
 
     def _ask(self, messages: list[dict]) -> tuple[dict, dict, float] | None:
         """One model call, tried up to ATTEMPTS times: (message, usage, latency) or None."""

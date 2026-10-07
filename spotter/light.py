@@ -3,12 +3,12 @@
 from collections.abc import Callable
 from typing import Protocol
 
-COLORS = ("green", "red", "off")
+COLORS = ("green", "amber", "red", "off")
 
 
 class Light(Protocol):
     def set(self, color: str) -> None:
-        """Show green, red or off."""
+        """Show green, amber, red or off."""
 
 
 class ConsoleLight:
@@ -27,7 +27,8 @@ class KasaLight:
     """Where the TP-Link Kasa bulb goes (pip install python-kasa).
 
     Plan: connect to the bulb by host, then set_hsv(120, 100, 100) for green,
-    set_hsv(0, 100, 100) for red and turn_off() for off. Until the bulb is here
+    set_hsv(40, 100, 100) for amber, set_hsv(0, 100, 100) for red and turn_off()
+    for off. Until the bulb is here
     this raises, so nothing can pretend to have switched it.
     """
 
