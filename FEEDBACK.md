@@ -270,3 +270,27 @@ reasoning tokens in 0 of them.
   recursive_mutex) after all work was done; releasing the capture and the ONNX
   objects did not help (4 in 20), ending with os._exit after flushing did
   (0 in 20).
+
+## 2026-10-08 — Week 3: finish check in code, with Nemotron Lightning's clean / reminder / code counts
+
+A finish check now runs after every event: code works out from the database,
+the light and this event's alerts what the rules require, tells the model once
+in plain words what is still missing (up to 3 more rounds), and does whatever is
+still missing itself. The same path covers an unreachable model and a model that
+runs out of rounds. New rule: when an overstayed car leaves, the owner is told
+it has gone and what was billed. compute_bill shows the model the total only
+when no fee applied.
+
+**Counts for nvidia/Nemotron-3_5-Lightning**, 12 console runs (overstay x5, booked x3,
+unknown x3) plus one overstay run with Telegram alerts, all PASS:
+
+- Events: 36 in the console runs: 30 clean, 6 after a reminder, 0 completed by code.
+  Per run: 6 clean, 6 after a reminder, 0 completed by code.
+  The Telegram run: 4 of 4 clean.
+- By event: ARRIVED: 12 clean, 0 after a reminder, 0 by code; ENDING_SOON: 6 clean, 0 after a reminder, 0 by code; LEFT: 6 clean, 6 after a reminder, 0 by code; OVERSTAY: 6 clean, 0 after a reminder, 0 by code.
+- Every reminder was about the same thing: on LEFT with an open stay the model
+  stopped after the bill alert, one tool call short of set_light off. Told so,
+  it set the light at once every time, so code never had to act.
+- The new owner alert after an overstay was delivered with the bill total in
+  all six overstay runs. The plain bill alert now reads with the total only.
+- 167 model calls, 0.40 s on average, 0.71 s at most; reasoning tokens in 0 runs.

@@ -7,6 +7,8 @@ COLORS = ("green", "amber", "red", "off")
 
 
 class Light(Protocol):
+    color: str | None  # what the light shows now, None until first set
+
     def set(self, color: str) -> None:
         """Show green, amber, red or off."""
 
@@ -17,9 +19,11 @@ class ConsoleLight:
     def __init__(self, say: Callable[[str], None] = print) -> None:
         self.say = say
         self.history: list[str] = []
+        self.color: str | None = None
 
     def set(self, color: str) -> None:
         self.history.append(color)
+        self.color = color
         self.say(f"LIGHT -> {color.upper()}")
 
 
@@ -34,6 +38,7 @@ class KasaLight:
 
     def __init__(self, host: str) -> None:
         self.host = host
+        self.color: str | None = None
 
     def set(self, color: str) -> None:
         raise NotImplementedError("the Kasa bulb is not wired up yet")

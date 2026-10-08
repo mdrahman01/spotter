@@ -147,8 +147,9 @@ class ToolRulesTest(unittest.TestCase):
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
         self.assertEqual((bill["minutes"], bill["amount_cents"], bill["total"]), (1, 9, "$0.09"))
-        self.assertEqual((bill["parking"], bill["overstayed"]), ("$0.09", False))
+        self.assertEqual(bill["overstayed"], False)
         self.assertNotIn("overstay_fee", bill)  # no fee applied, so the model sees none
+        self.assertNotIn("parking", bill)  # and gets the total only, not parking and total
         self.assertEqual(bill["rate"], "$5.00/hour")
         self.assertNotIn("rate_cents_per_hour", bill)
         self.assertEqual(scene.db.session(1)["amount_cents"], 9)
@@ -163,8 +164,9 @@ class ToolRulesTest(unittest.TestCase):
         scene.tools.start_session(PLATE)
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
-        self.assertEqual((bill["amount_cents"], bill["total"], bill["minimum_charge"]), (100, "$1.00", "$1.00"))
+        self.assertEqual((bill["amount_cents"], bill["total"]), (100, "$1.00"))
         self.assertTrue(bill["minimum_charge_applied"])
+        self.assertNotIn("parking", bill)
         self.assertEqual(scene.db.session(1)["amount_cents"], 100)
 
     def test_an_overstayed_stay_pays_the_fee_on_top_of_the_minimum_charge(self):

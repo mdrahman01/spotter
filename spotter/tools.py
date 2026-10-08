@@ -72,6 +72,35 @@ def bill_cents(
     return minutes, max(amount, min_charge_cents)
 
 
+def bill_for_session(db: Database, session: dict, min_charge_cents: int, overstay_fee_cents: int) -> dict:
+    """Compute, store and describe the bill of a closed stay: the one place the arithmetic lives.
+
+    Without an overstay fee the model is shown the total only; with one it gets
+    the breakdown (parking, overstay_fee, total) so its message can give it.
+    """
+    booking = db.booking(session["booking_id"])
+    arrived_at, left_at = parse(session["arrived_at"]), parse(session["left_at"])
+    rate = booking["rate_cents_per_hour"]
+    minutes, parking = bill_cents(arrived_at, left_at, rate, min_charge_cents)
+    overstayed = bool(session["overstayed_at"])
+    fee = overstay_fee_cents if overstayed else 0
+    total = parking + fee
+    db.set_amount(session["id"], total)
+    result = {
+        "session_id": session["id"],
+        "minutes": minutes,
+        "rate": rate_text(rate),
+        "minimum_charge_applied": bill_cents(arrived_at, left_at, rate)[1] < min_charge_cents,
+        "overstayed": overstayed,
+    }
+    if overstayed:
+        result["parking"] = dollars(parking)
+        result["overstay_fee"] = dollars(fee)
+    result["total"] = dollars(total)
+    result["amount_cents"] = total
+    return result
+
+
 def public(booking: dict) -> dict:
     """A booking as shown to the model: no plate (it knows it) and the rate in dollars."""
     return {
@@ -113,8 +142,8 @@ TOOL_SCHEMAS = [
     _tool("end_session", "End the open stay of the plate.", PLATE_PARAM, ["plate"]),
     _tool(
         "compute_bill",
-        "Compute and record the bill for an ended stay. Returns the breakdown in dollars: "
-        "parking, overstay fee and total.",
+        "Compute and record the bill for an ended stay. Returns the total in dollars, and "
+        "the breakdown (parking, overstay fee) when an overstay fee applied.",
         {"session_id": {"type": "integer", "description": "The stay's session_id."}},
         ["session_id"],
     ),
@@ -259,28 +288,7 @@ class Toolbox:
             return {"error": PLATE_RULE}
         if session["status"] != "closed":
             return {"error": "the stay is still open; end it before billing"}
-        booking = self.db.booking(session["booking_id"])
-        arrived_at, left_at = parse(session["arrived_at"]), parse(session["left_at"])
-        rate = booking["rate_cents_per_hour"]
-        minutes, parking = bill_cents(arrived_at, left_at, rate, self.min_charge_cents)
-        overstayed = bool(session["overstayed_at"])
-        fee = self.overstay_fee_cents if overstayed else 0
-        total = parking + fee
-        self.db.set_amount(session_id, total)
-        result = {
-            "session_id": session_id,
-            "minutes": minutes,
-            "rate": rate_text(rate),
-            "parking": dollars(parking),
-            "minimum_charge": dollars(self.min_charge_cents),
-            "minimum_charge_applied": bill_cents(arrived_at, left_at, rate)[1] < self.min_charge_cents,
-            "overstayed": overstayed,
-        }
-        if overstayed:  # a fee the model never sees is a fee it cannot mention
-            result["overstay_fee"] = dollars(fee)
-        result["total"] = dollars(total)
-        result["amount_cents"] = total
-        return result
+        return bill_for_session(self.db, session, self.min_charge_cents, self.overstay_fee_cents)
 
     def set_light(self, color: str) -> dict:
         color = str(color).lower()
