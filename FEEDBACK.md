@@ -281,16 +281,21 @@ runs out of rounds. New rule: when an overstayed car leaves, the owner is told
 it has gone and what was billed. compute_bill shows the model the total only
 when no fee applied.
 
-**Counts for nvidia/Nemotron-3_5-Lightning**, 12 console runs (overstay x5, booked x3,
-unknown x3) plus one overstay run with Telegram alerts, all PASS:
+**Counts for nvidia/Nemotron-3_5-Lightning**, 12 runs, all PASS: 11 with console
+alerts (overstay x5, booked x3, unknown x3) and one overstay run with Telegram
+alerts.
 
-- Events: 36 in the console runs: 30 clean, 6 after a reminder, 0 completed by code.
-  Per run: 6 clean, 6 after a reminder, 0 completed by code.
-  The Telegram run: 4 of 4 clean.
-- By event: ARRIVED: 12 clean, 0 after a reminder, 0 by code; ENDING_SOON: 6 clean, 0 after a reminder, 0 by code; LEFT: 6 clean, 6 after a reminder, 0 by code; OVERSTAY: 6 clean, 0 after a reminder, 0 by code.
+- Events: 36 across the 12 runs: 30 clean, 6 after a reminder, 0 completed by
+  code. Per run: 6 clean, 6 after a reminder, 0 completed by code (console runs
+  alone: 5 clean, 6 after a reminder; the Telegram run was clean).
+- By event: ARRIVED 12 clean; ENDING_SOON 6 clean; OVERSTAY 6 clean; LEFT 6
+  clean, 6 after a reminder.
 - Every reminder was about the same thing: on LEFT with an open stay the model
   stopped after the bill alert, one tool call short of set_light off. Told so,
   it set the light at once every time, so code never had to act.
 - The new owner alert after an overstay was delivered with the bill total in
   all six overstay runs. The plain bill alert now reads with the total only.
+- One wording slip seen: an owner alert after an overstay said the car had
+  stayed "16 minutes" when it was 16 seconds; the model worked the duration out
+  from the timestamps itself, and no check reads that figure.
 - 167 model calls, 0.40 s on average, 0.71 s at most; reasoning tokens in 0 runs.
