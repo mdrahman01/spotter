@@ -101,7 +101,8 @@ class TimerRuleTest(unittest.TestCase):
                                last_read_at=seconds(14), last_read_snapshot="data/snapshots/last.jpg")
         tools = Toolbox(scene.db, ConsoleLight(say=lambda line: None), ConsoleAlerts(say=lambda line: None),
                         context, 100, 500)
-        self.assertEqual(tools.end_session(PLATE)["left_at"], "2026-01-01T12:00:14+00:00")
+        tools.end_session(PLATE)
+        self.assertEqual(scene.db.session(scene.session_id)["left_at"], "2026-01-01T12:00:14+00:00")
         bill = tools.compute_bill(scene.session_id)
         self.assertEqual((bill["overstayed"], bill["total"], bill["amount_cents"]), (False, "$1.00", 100))
         self.assertNotIn("overstay_fee", bill)

@@ -7,6 +7,7 @@ from spotter.alerts import Alert, ConsoleAlerts
 from spotter.db import Database
 from spotter.light import ConsoleLight
 from spotter.tools import EventContext, Toolbox, bill_cents, public
+from spotter.words import WordBook, clock_words, duration_words
 
 PLATE = "TEST123"
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -101,8 +102,12 @@ class ToolRulesTest(unittest.TestCase):
         self.assertEqual((none["status"], none["booking"]), ("no_booking", None))
 
     def test_money_is_shown_in_dollars(self):
-        booking = {"id": 1, "driver": "D", "starts_at": "s", "ends_at": "e", "rate_cents_per_hour": 1250, "plate": PLATE}
-        self.assertEqual(public(booking)["rate"], "$12.50/hour")
+        booking = {"id": 1, "driver": "D", "starts_at": "2026-01-01T11:00:00+00:00", "ends_at": "2026-01-01T23:00:00+00:00",
+                   "rate_cents_per_hour": 1250, "plate": PLATE}
+        shown = public(booking, WordBook(), T0)
+        self.assertEqual(shown["rate"], "$12.50/hour")
+        self.assertEqual((shown["starts"], shown["ends"]), (clock_words(T0 - timedelta(hours=1), T0), clock_words(T0 + timedelta(hours=11), T0)))
+        self.assertNotIn("starts_at", shown)  # times reach the model only as words
 
     def test_tools_act_only_on_the_events_plate(self):
         scene = Scene()
@@ -118,7 +123,7 @@ class ToolRulesTest(unittest.TestCase):
         first = scene.tools.start_session(PLATE)
         self.assertEqual((first["session_id"], first["status"], first["driver"]), (1, "open", "Dana Driver"))
         open_stay = scene.tools.lookup_booking(PLATE)["open_session"]
-        self.assertEqual(open_stay, {"session_id": 1, "arrived_at": "2026-01-01T12:00:00+00:00",
+        self.assertEqual(open_stay, {"session_id": 1, "arrived": clock_words(T0, T0),
                                      "ending_soon_warned": False, "overstayed": False})
         second = scene.tools.start_session(PLATE)
         self.assertIn("error", second)
@@ -135,7 +140,8 @@ class ToolRulesTest(unittest.TestCase):
         scene.tools.start_session(PLATE)
         ended = scene.rebind("LEFT", at=T0 + timedelta(seconds=90)).end_session(PLATE)
         self.assertEqual((ended["session_id"], ended["status"]), (1, "closed"))
-        self.assertEqual(ended["left_at"], "2026-01-01T12:01:30+00:00")
+        self.assertEqual(scene.db.session(1)["left_at"], "2026-01-01T12:01:30+00:00")
+        self.assertEqual((ended["left"], ended["stayed"]), (clock_words(T0 + timedelta(seconds=90), T0), "1 minute 30 seconds"))
         self.assertIn("error", scene.tools.end_session(PLATE))
 
     def test_compute_bill_rules(self):
@@ -146,7 +152,8 @@ class ToolRulesTest(unittest.TestCase):
         self.assertIn("error", scene.tools.compute_bill(1))  # still open
         scene.rebind("LEFT", at=T0 + timedelta(seconds=19.6)).end_session(PLATE)
         bill = scene.tools.compute_bill(1)
-        self.assertEqual((bill["minutes"], bill["amount_cents"], bill["total"]), (1, 9, "$0.09"))
+        self.assertEqual((bill["time_billed"], bill["amount_cents"], bill["total"]), ("1 minute", 9, "$0.09"))
+        self.assertNotIn("minutes", bill)
         self.assertEqual(bill["overstayed"], False)
         self.assertNotIn("overstay_fee", bill)  # no fee applied, so the model sees none
         self.assertNotIn("parking", bill)  # and gets the total only, not parking and total
@@ -191,11 +198,11 @@ class ToolRulesTest(unittest.TestCase):
             last_read_snapshot="data/snapshots/last-read.jpg",
         )
         ended = left.end_session(PLATE)
-        self.assertEqual(ended["left_at"], "2026-01-01T12:00:22+00:00")
+        self.assertEqual(ended["left"], clock_words(T0 + timedelta(seconds=22.22), T0))
         session = scene.db.session(1)
         self.assertEqual((session["left_at"], session["left_snapshot"]),
                          ("2026-01-01T12:00:22+00:00", "data/snapshots/last-read.jpg"))
-        self.assertEqual(left.compute_bill(1)["minutes"], 1)
+        self.assertEqual(left.compute_bill(1)["time_billed"], "1 minute")
         # LEFT alerts carry the frame of the last sighting, not the frame when LEFT fired.
         self.assertEqual(left.send_alert("driver", "Bye.")["snapshot"], "data/snapshots/last-read.jpg")
         self.assertEqual(scene.alerts.sent[-1].snapshot, "data/snapshots/last-read.jpg")
@@ -204,8 +211,8 @@ class ToolRulesTest(unittest.TestCase):
         scene = Scene(min_charge=0)
         scene.tools.start_session(PLATE)
         self.assertEqual(scene.tools.send_alert("owner", "Hi.")["snapshot"], SNAPSHOT)
-        ended = scene.rebind("LEFT", at=T0 + timedelta(seconds=90)).end_session(PLATE)
-        self.assertEqual(ended["left_at"], "2026-01-01T12:01:30+00:00")  # no last read given: the event time
+        scene.rebind("LEFT", at=T0 + timedelta(seconds=90)).end_session(PLATE)
+        self.assertEqual(scene.db.session(1)["left_at"], "2026-01-01T12:01:30+00:00")  # no last read given: the event time
 
     def test_the_overstay_fee_is_a_setting(self):
         scene = Scene(min_charge=0, overstay_fee=250)

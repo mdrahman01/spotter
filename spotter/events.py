@@ -38,6 +38,7 @@ class EventFrames:
     snapshot: str  # repo-relative path of the frame when it fired
     last_read_at: datetime  # real time the plate was last read
     last_read_snapshot: str  # repo-relative path of that frame
+    first_read_at: datetime | None = None  # real time the plate was first read in this stay
 
 
 @dataclass

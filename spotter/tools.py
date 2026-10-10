@@ -8,7 +8,9 @@ The code, not the model, enforces the rules and does the arithmetic:
   overstayed stay pays a flat overstay fee on top.
 A broken rule comes back to the model as {"error": ...}; nothing raises. Error
 messages never contain plate text, so they can be printed as they are. Money
-is shown to the model as dollars ("$5.00/hour"), never as cents.
+is shown to the model as dollars ("$5.00/hour"), never as cents, and every
+clock time or duration as words made by code ("6:02 pm", "16 seconds"), which
+the WordBook remembers for the finish check.
 """
 
 import json
@@ -18,9 +20,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from spotter.alerts import Alert, Alerts
-from spotter.db import Database, iso, parse
+from spotter.db import Database, parse
 from spotter.light import COLORS, Light
 from spotter.reader import normalize
+from spotter.words import WordBook
 
 PLATE_RULE = "this tool may only act on the plate in the current event"
 DEFAULT_MIN_CHARGE_CENTS = 100
@@ -72,12 +75,16 @@ def bill_cents(
     return minutes, max(amount, min_charge_cents)
 
 
-def bill_for_session(db: Database, session: dict, min_charge_cents: int, overstay_fee_cents: int) -> dict:
+def bill_for_session(
+    db: Database, session: dict, min_charge_cents: int, overstay_fee_cents: int, words: WordBook | None = None
+) -> dict:
     """Compute, store and describe the bill of a closed stay: the one place the arithmetic lives.
 
     Without an overstay fee the model is shown the total only; with one it gets
     the breakdown (parking, overstay_fee, total) so its message can give it.
+    The time billed is given as words.
     """
+    words = words or WordBook()
     booking = db.booking(session["booking_id"])
     arrived_at, left_at = parse(session["arrived_at"]), parse(session["left_at"])
     rate = booking["rate_cents_per_hour"]
@@ -88,7 +95,7 @@ def bill_for_session(db: Database, session: dict, min_charge_cents: int, oversta
     db.set_amount(session["id"], total)
     result = {
         "session_id": session["id"],
-        "minutes": minutes,
+        "time_billed": words.duration(minutes * 60),
         "rate": rate_text(rate),
         "minimum_charge_applied": bill_cents(arrived_at, left_at, rate)[1] < min_charge_cents,
         "overstayed": overstayed,
@@ -101,13 +108,13 @@ def bill_for_session(db: Database, session: dict, min_charge_cents: int, oversta
     return result
 
 
-def public(booking: dict) -> dict:
-    """A booking as shown to the model: no plate (it knows it) and the rate in dollars."""
+def public(booking: dict, words: WordBook, now: datetime) -> dict:
+    """A booking as shown to the model: no plate (it knows it), times as words, the rate in dollars."""
     return {
         "id": booking["id"],
         "driver": booking["driver"],
-        "starts_at": booking["starts_at"],
-        "ends_at": booking["ends_at"],
+        "starts": words.clock(parse(booking["starts_at"]), now),
+        "ends": words.clock(parse(booking["ends_at"]), now),
         "rate": rate_text(booking["rate_cents_per_hour"]),
     }
 
@@ -177,6 +184,7 @@ class Toolbox:
         event: EventContext,
         min_charge_cents: int = DEFAULT_MIN_CHARGE_CENTS,
         overstay_fee_cents: int = DEFAULT_OVERSTAY_FEE_CENTS,
+        words: WordBook | None = None,
     ) -> None:
         self.db = db
         self.light = light
@@ -184,6 +192,7 @@ class Toolbox:
         self.event = event
         self.min_charge_cents = min_charge_cents
         self.overstay_fee_cents = overstay_fee_cents
+        self.words = words or WordBook()
 
     def call(self, name: str, arguments: str) -> dict:
         """Run one tool call as the model made it. Always returns a dict."""
@@ -213,7 +222,7 @@ class Toolbox:
             return None
         return {
             "session_id": stay["id"],
-            "arrived_at": stay["arrived_at"],
+            "arrived": self.words.clock(parse(stay["arrived_at"]), self.event.at),
             "ending_soon_warned": bool(stay["ending_soon_at"]),
             "overstayed": bool(stay["overstayed_at"]),
         }
@@ -224,22 +233,22 @@ class Toolbox:
         open_stay = self._open_stay()
         active = self.db.booking_at(self.event.plate, self.event.at)
         if active:
-            return {"status": "active", "booking": public(active), "open_session": open_stay}
+            return {"status": "active", "booking": public(active, self.words, self.event.at), "open_session": open_stay}
         stay = self.db.open_session(self.event.plate)
         if stay:
             # A booked car still here after its booking ended is overstaying, not unbooked.
             return {
                 "status": "overstaying",
-                "booking": public(self.db.booking(stay["booking_id"])),
-                "now": iso(self.event.at),
+                "booking": public(self.db.booking(stay["booking_id"]), self.words, self.event.at),
+                "now": self.words.clock(self.event.at, self.event.at),
                 "open_session": open_stay,
             }
         latest = self.db.latest_booking(self.event.plate)
         if latest:
             return {
                 "status": "outside_window",
-                "booking": public(latest),
-                "now": iso(self.event.at),
+                "booking": public(latest, self.words, self.event.at),
+                "now": self.words.clock(self.event.at, self.event.at),
                 "open_session": None,
             }
         return {"status": "no_booking", "booking": None, "open_session": None}
@@ -257,7 +266,7 @@ class Toolbox:
             "session_id": session_id,
             "booking_id": booking["id"],
             "driver": booking["driver"],
-            "arrived_at": iso(self.event.at),
+            "arrived": self.words.clock(self.event.at, self.event.at),
             "status": "open",
         }
 
@@ -269,10 +278,12 @@ class Toolbox:
             return {"error": "there is no open stay for this plate"}
         left_at = self.event.departed_at
         self.db.close_session(stay["id"], left_at, self.event.attachment)
+        arrived_at = parse(stay["arrived_at"])
         return {
             "session_id": stay["id"],
-            "arrived_at": stay["arrived_at"],
-            "left_at": iso(left_at),
+            "arrived": self.words.clock(arrived_at, self.event.at),
+            "left": self.words.clock(left_at, self.event.at),
+            "stayed": self.words.duration((left_at - arrived_at).total_seconds()),
             "status": "closed",
         }
 
@@ -288,13 +299,16 @@ class Toolbox:
             return {"error": PLATE_RULE}
         if session["status"] != "closed":
             return {"error": "the stay is still open; end it before billing"}
-        return bill_for_session(self.db, session, self.min_charge_cents, self.overstay_fee_cents)
+        return bill_for_session(self.db, session, self.min_charge_cents, self.overstay_fee_cents, self.words)
 
     def set_light(self, color: str) -> dict:
         color = str(color).lower()
         if color not in COLORS:
             return {"error": f"color must be one of {', '.join(COLORS)}"}
-        self.light.set(color)
+        try:
+            self.light.set(color)
+        except Exception as err:  # the bulb did not respond; the finish check will try again
+            return {"error": f"the light did not respond: {err}"}
         return {"light": color, "seconds_after_event": round(time.perf_counter() - self.event.started, 1)}
 
     def send_alert(self, to: str, message: str) -> dict:

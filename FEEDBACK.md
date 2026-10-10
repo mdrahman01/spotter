@@ -299,3 +299,35 @@ alerts.
   stayed "16 minutes" when it was 16 seconds; the model worked the duration out
   from the timestamps itself, and no check reads that figure.
 - 167 model calls, 0.40 s on average, 0.71 s at most; reasoning tokens in 0 runs.
+
+## 2026-10-09 — Week 4: the "16 minutes" slip and its cure; live source, bulb and calibration added
+
+**The slip.** After an overstay, Nemotron Lightning told the owner the car had
+stayed "16 minutes". It had stayed 16 seconds. The event gave the model raw
+timestamps (arrived 04:30:00, left 04:30:16) and it worked the duration out
+itself, getting the unit wrong. The same thing had already happened once with
+the time left before a booking ends ("1 minute" for 4 seconds).
+
+**The cure, same as for the time left.** The model is never given a raw
+timestamp or a number of seconds again. Every clock time and duration it may
+repeat is made by code, as words in the machine's local time zone: "6:02 pm",
+"Sat 10 Oct, 11:56 am", "16 seconds", "1 minute 30 seconds", "1 hour 46
+minutes". That covers the booking's start and end, the arrival, the last read,
+the length of the stay, the time left and the time billed. The rules say to use
+the words exactly as given and never to work out a time or duration. Code keeps
+a list of the words it supplied for each event, and the scenario check fails
+any alert that states a clock time or duration not on that list.
+
+**Evidence this round.** In the two live runs against a local RTSP stream the
+alerts said "16 seconds" and "34 seconds" for the stays and "1 minute" for the
+time billed, all words code had supplied; the three replay scenarios passed
+with 8 of 8 events clean, and the booked and overstay checks now include the
+supplied-words rule. Latency and reasoning tokens unchanged: 0.3 to 0.7 s per
+call, zero reasoning tokens.
+
+**Also this round, no model change.** A live source (an RTSP camera, or the
+sample video played in real time) with a newest-frame reader, watched time that
+ignores gaps over 2 s, camera outage events with one owner alert each way from
+code, a clean Ctrl-C; the Kasa bulb as the signal light with a console
+stand-in; and python -m spotter.calibrate, which proposed a watch zone from the
+sample video that gave the same ARRIVED and LEFT as the hand-set one.

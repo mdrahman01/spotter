@@ -9,7 +9,7 @@ from spotter.alerts import Alert, ConsoleAlerts
 from spotter.attendant import AFTER_REMINDER, BY_CODE, CLEAN, REMINDER_ROUNDS, Attendant
 from spotter.db import Database
 from spotter.events import Event, EventFrames
-from spotter.light import ConsoleLight
+from spotter.light import ConsoleLight, LightError
 from spotter.privacy import Masker
 
 PLATE = "TEST123"
@@ -74,12 +74,25 @@ class FailingAlerts:
         return "URLError: simulated outage"
 
 
+class DeadLight:
+    """A bulb that never answers."""
+
+    color = None
+
+    def __init__(self):
+        self.attempts = 0
+
+    def set(self, color):
+        self.attempts += 1
+        raise LightError("OSError: no route to host")
+
+
 class Scene:
-    def __init__(self, script, booked=True, alerts=None):
+    def __init__(self, script, booked=True, alerts=None, light=None):
         self.db = Database(":memory:")
         if booked:
             self.booking = self.db.add_booking(PLATE, "Dana Driver", T0 - timedelta(hours=1), T0 + timedelta(hours=11), 500)
-        self.light = ConsoleLight(say=quiet)
+        self.light = light if light is not None else ConsoleLight(say=quiet)
         self.alerts = alerts if alerts is not None else ConsoleAlerts(say=quiet)
         self.model = FakeModel(script)
         masker = Masker(None)
@@ -198,6 +211,38 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual((session["status"], session["amount_cents"], session["left_snapshot"]), ("closed", 100, "data/snapshots/last.jpg"))
         self.assertIn("$1.00", scene.alerts.sent[-1].message)
         self.assertEqual(scene.light.color, "off")
+
+    def test_a_light_that_does_not_respond_is_reported_once_and_the_owner_told_once(self):
+        dead = DeadLight()
+        scene = Scene([[LOOKUP], [START], [GREEN], [WELCOME], "Done.", [GREEN], "Tried again."], light=dead)
+        scene.arrive()
+        tool_errors = [json.loads(a["result"]) for a in scene.rows("set_light")]
+        self.assertTrue(all("did not respond" in r["error"] for r in tool_errors))
+        self.assertEqual(len(tool_errors), 3)  # the model twice, code once
+        self.assertEqual(scene.by_code(), ["set_light", "send_alert"])
+        owner = [a for a in scene.alerts.sent if a.to == "owner"]
+        self.assertEqual(len(owner), 1)
+        self.assertIn("not responding", owner[0].message)
+        self.assertEqual(dead.attempts, 3)
+        # A second event with the same dead light: recorded again, but the owner is not told twice.
+        scene.model.script = [[LOOKUP], [("end_session", {"plate": PLATE})], [("compute_bill", {"session_id": 1})],
+                              [("send_alert", {"to": "driver", "message": "Your stay has ended. The bill is $1.00."})], "Done.", "Nothing more."]
+        scene.leave()
+        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "owner"]), 1)
+        self.assertEqual(scene.attendant.stats.finished[BY_CODE], 2)
+
+    def test_the_model_is_given_times_as_words_and_they_are_recorded(self):
+        scene = Scene([[LOOKUP], [START], [GREEN], [WELCOME], "Done."])
+        scene.arrive()
+        payload = json.loads(scene.model.requests[0]["messages"][1]["content"])
+        self.assertRegex(payload["time"], r"\d{1,2}:\d{2} (am|pm)")
+        self.assertNotIn("T", payload["time"])
+        lookup = json.loads(next(m for m in scene.model.requests[1]["messages"] if m["role"] == "tool")["content"])
+        self.assertRegex(lookup["booking"]["starts"], r"\d{1,2}:\d{2} (am|pm)")
+        self.assertNotIn("starts_at", lookup["booking"])
+        words = json.loads(scene.rows("words")[0]["arguments"])["supplied"]
+        self.assertIn(payload["time"], words)
+        self.assertIn(lookup["booking"]["ends"], words)
 
     def test_an_unbooked_arrival_and_departure(self):
         scene = Scene([[LOOKUP], [("set_light", {"color": "red"})], "Done.", "Nothing more."], booked=False)

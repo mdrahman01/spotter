@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, fields
 
 ENV_PREFIX = "SPOTTER_"
 ALERT_KINDS = ("console", "telegram")
+LIGHT_KINDS = ("console", "kasa")
 
 Zone = tuple[float, float, float, float]
 
@@ -62,6 +63,16 @@ class Settings:
     overstay_fee_cents: int = field(
         default=500, metadata={"help": "flat fee added to an overstayed stay, in cents"}
     )
+    light: str = field(
+        default="console",
+        metadata={"help": "the signal light: console (prints) or kasa (a TP-Link bulb)"},
+    )
+    light_host: str | None = field(
+        default=None, metadata={"help": "IP address or host name of the Kasa bulb"}
+    )
+    light_brightness: int = field(
+        default=100, metadata={"help": "brightness of the bulb's colours, 1 to 100"}
+    )
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -84,6 +95,10 @@ class Settings:
             raise ValueError("min_charge_cents must not be negative")
         if self.ending_soon_s < 0 or self.overstay_grace_s < 0 or self.overstay_fee_cents < 0:
             raise ValueError("ending_soon_s, overstay_grace_s and overstay_fee_cents must not be negative")
+        if self.light not in LIGHT_KINDS:
+            raise ValueError(f"light must be one of {', '.join(LIGHT_KINDS)}, got {self.light!r}")
+        if not 1 <= self.light_brightness <= 100:
+            raise ValueError("light_brightness must be between 1 and 100")
 
 
 def parse_zone(text: str) -> Zone:
@@ -107,6 +122,9 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "ending_soon_s": float,
     "overstay_grace_s": float,
     "overstay_fee_cents": int,
+    "light": str.lower,
+    "light_host": str,
+    "light_brightness": int,
 }
 
 

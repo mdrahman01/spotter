@@ -25,9 +25,10 @@ from openai import OpenAI
 from spotter.alerts import Alert, Alerts
 from spotter.db import Database, iso, parse
 from spotter.events import Event, EventFrames
-from spotter.light import Light
+from spotter.light import Light, LightError
 from spotter.privacy import Masker
 from spotter.timers import time_left_words
+from spotter.words import WordBook
 from spotter.tools import (
     DEFAULT_MIN_CHARGE_CENTS,
     DEFAULT_OVERSTAY_FEE_CENTS,
@@ -48,7 +49,9 @@ SYSTEM_PROMPT = """\
 You are Spotter, the automated attendant for one private driveway.
 Each user message is one event (ARRIVED, ENDING_SOON, OVERSTAY or LEFT) for one licence plate, as JSON.
 You act only through the tools. The code behind them enforces the rules and does
-all arithmetic; a tool that returns {"error": ...} did nothing.
+all arithmetic; a tool that returns {"error": ...} did nothing. Clock times and
+durations come to you as words (like "6:02 pm" or "16 seconds"): use them exactly
+as given, and never work out a time or a duration yourself.
 
 Rules:
 1. Always call lookup_booking first. Never assume a booking.
@@ -109,11 +112,6 @@ class Missing:
     fix: Callable[[], None] | None  # what code does about it; None when code cannot
 
 
-def describe_duration(seconds: float) -> str:
-    minutes, rest = divmod(round(seconds), 60)
-    return f"{minutes} min {rest} s" if minutes else f"{rest} seconds"
-
-
 class Attendant:
     def __init__(
         self,
@@ -139,6 +137,8 @@ class Attendant:
         self.stats = Stats()
         self._alerts: list[tuple[str, str, bool]] = []  # (to, message, delivered) in this event
         self._logged_event: dict = {}
+        self._words = WordBook()
+        self._light_failure_alerted = False  # the owner hears once that the light is not responding
 
     # ----------------------------------------------------------------- one event
 
@@ -158,28 +158,31 @@ class Attendant:
             last_read_snapshot=frames.last_read_snapshot if left else None,
             started=time.perf_counter(),
         )
+        self._words = words = WordBook()
         toolbox = Toolbox(
-            self.db, self.light, self.alerts, context, self.min_charge_cents, self.overstay_fee_cents
+            self.db, self.light, self.alerts, context, self.min_charge_cents, self.overstay_fee_cents, words
         )
-        expected = self._expected(event, context)
+        expected = self._expected(event, frames)
         self._alerts = []
         self._logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
         if left:
             self._logged_event["last_read_at"] = iso(frames.last_read_at)
 
-        # The model gets facts it acts on, not file paths: the code attaches snapshots.
-        payload = {"event": event.type, "plate": event.plate, "time": iso(at), "reads": event.reads}
+        # The model gets facts it acts on, as words it can repeat, not file paths or
+        # raw timestamps: the code attaches snapshots and makes every time and duration.
+        payload = {"event": event.type, "plate": event.plate, "time": words.clock(at, at), "reads": event.reads}
         if left:
-            payload["last_read_at"] = iso(frames.last_read_at)  # the car left when it was last read
+            payload["last_read"] = words.clock(frames.last_read_at, at)  # the car left when it was last read
             if expected.stay is None:
-                payload["stayed_for"] = expected.stayed_for
+                payload["stayed_for"] = words.note(expected.stayed_for)
         elif event.type == "ENDING_SOON" and expected.stay:
-            payload["booking_ends_at"] = self.db.booking(expected.stay["booking_id"])["ends_at"]
-            payload["time_left"] = expected.time_left
+            ends_at = parse(self.db.booking(expected.stay["booking_id"])["ends_at"])
+            payload["booking_ends"] = words.clock(ends_at, at)
+            payload["time_left"] = words.note(expected.time_left)
         elif event.type == "OVERSTAY" and expected.stay:
-            ends_at = self.db.booking(expected.stay["booking_id"])["ends_at"]
-            payload["booking_ended_at"] = ends_at
-            payload["ended_ago"] = describe_duration((at - parse(ends_at)).total_seconds())
+            ends_at = parse(self.db.booking(expected.stay["booking_id"])["ends_at"])
+            payload["booking_ended"] = words.clock(ends_at, at)
+            payload["ended_ago"] = words.duration((at - ends_at).total_seconds())
             payload["overstay_fee"] = dollars(self.overstay_fee_cents)
         say(f"=== {event.type} {self.masker.label(event.plate)} at {iso(at)} ===")
 
@@ -203,6 +206,7 @@ class Attendant:
             self._complete(missing)
             how = BY_CODE
         self.stats.finished[how] += 1
+        self._record("words", {"supplied": self._words.supplied}, {"count": len(self._words.supplied)}, quiet=True)
         self._record(
             "finish",
             {"how": how},
@@ -217,16 +221,20 @@ class Attendant:
         say(f"FINISH: {how}{detail}")
         self.stats.finish_lines.append(f"{event.type} {how}{detail}")
 
-    def _expected(self, event: Event, context: EventContext) -> Expected:
+    def _expected(self, event: Event, frames: EventFrames) -> Expected:
         stay = self.db.open_session(event.plate)
-        booking = self.db.booking_at(event.plate, context.at)
+        booking = self.db.booking_at(event.plate, frames.at)
         time_left = None
         if event.type == "ENDING_SOON" and stay:
             ends_at = parse(self.db.booking(stay["booking_id"])["ends_at"])
-            time_left = time_left_words(max(0.0, (ends_at - context.at).total_seconds()))
+            time_left = time_left_words(max(0.0, (ends_at - frames.at).total_seconds()))
         stayed_for = None
         if event.type == "LEFT" and stay is None:
-            stayed_for = describe_duration(event.last_seen - event.first_seen)
+            if frames.first_read_at is not None:
+                seconds = (frames.last_read_at - frames.first_read_at).total_seconds()
+            else:
+                seconds = event.last_seen - event.first_seen
+            stayed_for = self._words.duration(seconds)
         return Expected(event.type, event.plate, booking, stay, time_left, stayed_for)
 
     # ------------------------------------------------------------ the model loop
@@ -459,7 +467,14 @@ class Attendant:
             self.masker.print(f"CODE {tool} {json.dumps(arguments)} -> {json.dumps(result)}")
 
     def _fix_light(self, color: str, context: EventContext) -> None:
-        self.light.set(color)
+        try:
+            self.light.set(color)
+        except LightError as err:
+            self._record("set_light", {"color": color, "by": "code"}, {"error": f"the light did not respond: {err}", "by": "code"})
+            if not self._light_failure_alerted:
+                self._light_failure_alerted = True
+                self._fix_alert("owner", "The signal light is not responding.", context)
+            return
         seconds = round(time.perf_counter() - context.started, 1)
         self._record(
             "set_light", {"color": color, "by": "code"}, {"light": color, "seconds_after_event": seconds, "by": "code"}
@@ -502,7 +517,7 @@ class Attendant:
         if session["status"] != "closed":
             self._record("compute_bill", {"by": "code"}, {"error": "the stay is still open", "by": "code"})
             return
-        result = bill_for_session(self.db, session, self.min_charge_cents, self.overstay_fee_cents)
+        result = bill_for_session(self.db, session, self.min_charge_cents, self.overstay_fee_cents, self._words)
         self._record("compute_bill", {"by": "code"}, {**result, "by": "code"})
 
     def _bill_text(self, expected: Expected, for_owner: bool) -> str:

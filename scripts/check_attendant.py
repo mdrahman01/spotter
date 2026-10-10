@@ -20,13 +20,16 @@ Required end state:
                            the stay overstayed, an owner alert containing the total.
   LEFT, no stay:           an owner alert, light off.
 Wording: in booked and overstay no closing sentence or alert may call the car
-unbooked; in booked no alert may mention an overstay. Shape: booked has one
+unbooked; in booked no alert may mention an overstay; and no alert may state a
+clock time or a duration that code did not supply for that event (the "words"
+row of the event lists what code supplied). Shape: booked has one
 closed session billed at least the minimum charge; unknown has no session;
 overstay has ARRIVED, ENDING_SOON, OVERSTAY, LEFT in that order and a 600 cent
 bill with a 500 cent overstay fee.
 """
 
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -40,6 +43,25 @@ from spotter.tools import dollars  # noqa: E402
 
 SCENARIOS = ("booked", "unknown", "overstay")
 OVERSTAY_EVENTS = ["ARRIVED", "ENDING_SOON", "OVERSTAY", "LEFT"]
+CAMERA_EVENTS = ("CAMERA_OFFLINE", "CAMERA_BACK")
+
+CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b", re.IGNORECASE)
+ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?")
+DURATION = re.compile(r"\b(\d+(?:\.\d+)?)[\s-]*(second|sec|minute|min|hour|hr|day)s?\b", re.IGNORECASE)
+UNITS = {"sec": "second", "min": "minute", "hr": "hour"}
+
+
+def time_tokens(text: str) -> set[str]:
+    """Every clock time or duration stated in `text`, one canonical token each."""
+    tokens = set()
+    for hours, minutes, meridiem in CLOCK.findall(text):
+        tokens.add(f"clock {int(hours)}:{minutes} {meridiem.lower()}".rstrip())
+    for match in ISO.findall(text):
+        tokens.add(f"iso {match}")
+    for number, unit in DURATION.findall(text):
+        unit = unit.lower()
+        tokens.add(f"duration {float(number):g} {UNITS.get(unit, unit)}")
+    return tokens
 
 
 def load_json(text: str):
@@ -68,6 +90,7 @@ def main() -> int:
         groups[-1]["rows"].append(action)
 
     failures, notes, texts, alert_texts = [], [], [], []
+    unsupplied: list[str] = []  # events whose alerts state a time or duration code did not supply
     finishes: Counter = Counter()
     light = None  # carried from event to event, as the real light is
     light_sequence = []
@@ -75,8 +98,12 @@ def main() -> int:
     model_problems = []
     for group in groups:
         event = group["event"]
-        kind, at, plate = event["type"], parse(event["time"]), event["plate"]
+        kind, at, plate = event["type"], parse(event["time"]), event.get("plate")
+        if kind in CAMERA_EVENTS:
+            notes.append(f"{kind} at {event['time']}")
+            continue
         alerts, reminders, code_items, errors = [], 0, 0, []
+        supplied_words: list[str] = []
         for row in group["rows"]:
             result = load_json(row["result"])
             arguments = load_json(row["arguments"])
@@ -86,6 +113,9 @@ def main() -> int:
                 reminders += 1
                 continue
             if tool == "finish":
+                continue
+            if tool == "words":
+                supplied_words = arguments.get("supplied") or []
                 continue
             if tool == "final":
                 texts.append(result.get("text") or "")
@@ -162,6 +192,11 @@ def main() -> int:
                 required = [("owner alert", has("owner")), ("light off", light == "off")]
                 expected_recipients = {"owner"}
 
+        allowed = set().union(*(time_tokens(words) for words in supplied_words)) if supplied_words else set()
+        stated = set().union(*(time_tokens(message) for _, message, _ in alerts)) if alerts else set()
+        if stated - allowed:
+            unsupplied.append(f"{kind}: {sorted(stated - allowed)} (code supplied {sorted(allowed) or 'nothing'})")
+
         how = "completed by code" if code_items else ("after a reminder" if reminders else "by the attendant")
         finishes[how] += 1
         state = ", ".join(f"{label} {'ok' if ok else 'MISSING'}" for label, ok in required)
@@ -199,6 +234,8 @@ def main() -> int:
         failures.append("a closing sentence or alert calls the car unbooked")
     if scenario == "booked" and any("overstay" in text.lower() for text in alert_texts):
         failures.append("an alert mentions an overstay")
+    for entry in unsupplied:
+        failures.append(f"an alert states a time or duration code did not supply: {entry}")
 
     # Scenario shape.
     order = [group["event"]["type"] for group in groups]
