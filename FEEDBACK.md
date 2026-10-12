@@ -331,3 +331,30 @@ ignores gaps over 2 s, camera outage events with one owner alert each way from
 code, a clean Ctrl-C; the Kasa bulb as the signal light with a console
 stand-in; and python -m spotter.calibrate, which proposed a watch zone from the
 sample video that gave the same ARRIVED and LEFT as the hand-set one.
+
+## 2026-10-12 — Hardware day: Nemotron Lightning over home Wi-Fi, on a real camera
+
+**Latency over the home link.** Across the seven live runs on the Tapo camera
+(14 events, 64 model calls through Nebius Token Factory) Nemotron-3.5-Lightning
+answered in 0.3 to 0.7 s per call with zero reasoning tokens, the same as from
+the desk, and no call failed. The one exception was the first call of the
+first run on 10 Oct, 12.8 s, made while the camera's Wi-Fi link was collapsing;
+the Mac shares that link, so a bad camera link also slows the model. Nothing
+in the attendant needed changing for the model: all 14 live events finished
+clean, with no reminder and nothing completed by code.
+
+**Wording held under real timings.** Every alert used the words code supplied.
+One boundary showed up in our own checker, not in the model: the run measures
+the time left at the exact sighting, a fraction under 60 s, so code said "less
+than a minute" and the model repeated it; the checker recomputed from the event
+time stored to the second, got "about 1 minute", and failed the run. The
+checker now reads the words code supplied for the event instead of working them
+out again. The model also kept adding an owner alert on every departure, which
+the rules do not require and the checker lists as a note, not a failure.
+
+**Network, not model.** The real trouble this round was the camera's Wi-Fi: it
+dropped every time the car drove off and once stayed down for 7 minutes, which
+delays LEFT (the rule counts only watched time) and, until the offline wait was
+raised from 10 s to 30 s, sent the owner a message for every blip. A Wi-Fi
+extender fixed it: 20 frames per second at 2K with no drop in two 3-minute
+tests, and steps 6 to 9 then passed first time.

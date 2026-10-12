@@ -44,6 +44,17 @@ class WatchedClockTest(unittest.TestCase):
 
 
 class CameraMonitorTest(unittest.TestCase):
+    def test_defaults_30_s_without_frames_and_30_s_for_the_first_frame(self):
+        monitor = CameraMonitor()
+        self.assertEqual(monitor.offline_after_s, 30)
+        self.assertEqual(monitor.first_frame_s, 30)
+        monitor.start(0.0)
+        monitor.frame(5.0)
+        self.assertFalse(monitor.tick(20.0))  # a 15 s blip sends nothing
+        self.assertIsNone(monitor.frame(20.5))
+        self.assertFalse(monitor.tick(50.4))
+        self.assertTrue(monitor.tick(50.5))  # 30 s after the last frame
+
     def test_offline_once_then_back_once_with_the_downtime(self):
         monitor = CameraMonitor(offline_after_s=10)
         monitor.start(0.0)
@@ -57,12 +68,29 @@ class CameraMonitorTest(unittest.TestCase):
         self.assertIsNone(monitor.frame(16.2))
         self.assertEqual(monitor.outages, 1)
 
-    def test_a_source_that_never_opens_counts_as_offline_from_the_start(self):
-        monitor = CameraMonitor(offline_after_s=10)
+    def test_one_failed_first_attempt_sends_no_alert(self):
+        monitor = CameraMonitor(offline_after_s=10, first_frame_s=30)
+        monitor.start(0.0)
+        self.assertTrue(monitor.no_frame_yet)
+        self.assertFalse(monitor.tick(10.0))  # the 10 s rule does not apply before the first frame
+        self.assertFalse(monitor.tick(15.0))
+        self.assertIsNone(monitor.frame(15.5))  # first frame after one failed attempt: not an outage
+        self.assertFalse(monitor.no_frame_yet)
+        self.assertEqual(monitor.outages, 0)
+        self.assertFalse(monitor.tick(25.4))  # from here on a 10 s gap is an outage
+        self.assertTrue(monitor.tick(25.5))
+        self.assertEqual(monitor.waited_s, 10)
+
+    def test_a_source_that_never_opens_is_offline_after_the_first_frame_wait(self):
+        monitor = CameraMonitor(offline_after_s=10, first_frame_s=30)
         monitor.start(100.0)
-        self.assertFalse(monitor.tick(109.0))
-        self.assertTrue(monitor.tick(110.0))
-        self.assertAlmostEqual(monitor.frame(130.0), 30.0)
+        self.assertFalse(monitor.tick(129.9))
+        self.assertTrue(monitor.tick(130.0))
+        self.assertTrue(monitor.no_frame_yet)
+        self.assertEqual(monitor.waited_s, 30)
+        self.assertFalse(monitor.tick(140.0))  # reported once
+        self.assertAlmostEqual(monitor.frame(145.0), 45.0)  # down since the start
+        self.assertEqual(monitor.outages, 1)
 
 
 class MaskSourceTest(unittest.TestCase):

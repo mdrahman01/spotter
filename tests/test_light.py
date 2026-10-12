@@ -41,7 +41,9 @@ class KasaLightTest(unittest.TestCase):
             self.seen = (host, username, password)
             return bulb
 
-        return KasaLight("192.168.1.77", "me@example.com", "secret-pass", connect=connect, say=lambda line: None, **kwargs)
+        light = KasaLight("192.168.1.77", "me@example.com", "secret-pass", connect=connect, say=lambda line: None, **kwargs)
+        self.addCleanup(light.close)  # closes its event loop, or Python complains about it at exit
+        return light
 
     def test_colours_at_full_saturation_with_no_fade(self):
         bulb = FakeBulb()

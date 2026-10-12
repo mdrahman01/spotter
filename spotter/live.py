@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 
 GAP_LIMIT_S = 2.0  # a longer gap between checked frames does not count as unread time
-OFFLINE_AFTER_S = 10.0  # no new frame for this long: the camera is offline
+OFFLINE_AFTER_S = 30.0  # no new frame for this long: the camera is offline (a shorter blip is not worth a message)
+FIRST_FRAME_S = 30.0  # at startup, wait this long for the first frame: one failed first attempt sends no alert
 RETRY_WAITS_S = (1, 2, 4, 8, 10)  # growing wait between reconnects; then 10 s each time
 TIMEOUT_S = 10.0  # open and read timeouts for a stream
 
@@ -62,17 +63,27 @@ class WatchedClock:
 
 
 class CameraMonitor:
-    """Notices when frames stop coming and when they come back, reporting each once."""
+    """Notices when frames stop coming and when they come back, reporting each once.
 
-    def __init__(self, offline_after_s: float = OFFLINE_AFTER_S) -> None:
+    At startup the first frame may take first_frame_s (connecting can fail once
+    and be retried); after that a gap of offline_after_s means the camera is offline.
+    """
+
+    def __init__(self, offline_after_s: float = OFFLINE_AFTER_S, first_frame_s: float = FIRST_FRAME_S) -> None:
         self.offline_after_s = offline_after_s
+        self.first_frame_s = first_frame_s
         self.started_at: float | None = None
         self.last_frame_at: float | None = None
         self.offline_since: float | None = None
+        self.waited_s: float | None = None  # the limit that was crossed when it last went offline
         self.outages = 0
 
     def start(self, now: float) -> None:
         self.started_at = now
+
+    @property
+    def no_frame_yet(self) -> bool:
+        return self.last_frame_at is None
 
     def frame(self, now: float) -> float | None:
         """A new frame arrived. Returns the seconds it was down if this ends an outage."""
@@ -87,9 +98,13 @@ class CameraMonitor:
         """No new frame right now. Returns True once when the camera has just gone offline."""
         if self.offline_since is not None:
             return False
-        since = self.last_frame_at if self.last_frame_at is not None else self.started_at
-        if since is not None and now - since >= self.offline_after_s:
+        if self.no_frame_yet:
+            since, limit = self.started_at, self.first_frame_s
+        else:
+            since, limit = self.last_frame_at, self.offline_after_s
+        if since is not None and now - since >= limit:
             self.offline_since = since
+            self.waited_s = limit
             self.outages += 1
             return True
         return False
@@ -103,9 +118,11 @@ class FrameSource:
         source: str,
         timeout_s: float = TIMEOUT_S,
         hold: Callable[[float], bool] | None = None,
+        say: Callable[[str], None] = print,
     ) -> None:
         self.source = source
         self.timeout_s = timeout_s
+        self.say = say  # one line of ours per failed attempt; OpenCV's own messages are silenced
         # Test only: while hold(time.time()) is true no frame is published, and a
         # file stands still, which imitates a camera outage with the car still there.
         self.hold = hold
@@ -141,7 +158,8 @@ class FrameSource:
     def _open(self) -> cv2.VideoCapture | None:
         if is_stream(self.source):
             os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
-            os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "16")  # errors only: no per-packet warnings on the console
+            os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")  # quiet: we report connection trouble ourselves
+            cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
             timeout_ms = int(self.timeout_s * 1000)
             capture = cv2.VideoCapture(
                 self.source,
@@ -168,8 +186,10 @@ class FrameSource:
             capture = self._open()
             if capture is None:
                 self.failed_opens += 1
-                self._sleep(RETRY_WAITS_S[min(attempt, len(RETRY_WAITS_S) - 1)])
+                wait = RETRY_WAITS_S[min(attempt, len(RETRY_WAITS_S) - 1)]
                 attempt += 1
+                self.say(f"source not reachable (attempt {attempt}); retrying in {wait}s")
+                self._sleep(wait)
                 continue
             attempt = 0
             self.opens += 1
@@ -196,4 +216,9 @@ class FrameSource:
             if file:  # the end of the file, not a dropped connection
                 self.ended = True
                 return
+            # Ctrl-C interrupts the blocking read before the main thread can call stop(),
+            # so wait the retry pause first and report a drop only if we are not stopping.
             self._sleep(RETRY_WAITS_S[0])
+            if self._stop.is_set():  # we closed it; not a drop
+                return
+            self.say("stream dropped; reconnecting")

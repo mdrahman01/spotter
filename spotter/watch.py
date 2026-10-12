@@ -9,7 +9,7 @@ a file gives the same events every run. Live: a background reader keeps only the
 newest frame and the loop takes it process_fps times a second, so no frame is
 stale. Live time counts toward "unread" only between checked frames less than
 2 s apart, so a stalled model call, a sleeping laptop or a dropped camera never
-looks like a departure. No new frame for 10 s is a camera outage: CAMERA_OFFLINE
+looks like a departure. No new frame for 30 s is a camera outage: CAMERA_OFFLINE
 is recorded (spotter.run tells the owner, from code), stays and the light stay as
 they are, the connection is retried with a growing wait, and CAMERA_BACK says
 how long it was down. The same happens when the source cannot be opened at
@@ -235,19 +235,20 @@ def run(
             line += f" | last read {frames.last_read_snapshot}"
         print(line, flush=True)
 
-    def camera_event(kind: str, when: datetime, down: float | None) -> None:
+    def camera_event(kind: str, when: datetime, down: float | None, waited_s: float = 0, first: bool = False) -> None:
         summary.events[kind] += 1
         if kind == CAMERA_BACK and down is not None:
             summary.downtime += down
         else:
             summary.outages += 1
-        detail = f"no new frame for {duration_words(settings_offline_s)}" if kind == CAMERA_OFFLINE else f"down {duration_words(down or 0)}"
+        if kind == CAMERA_OFFLINE:
+            detail = f"no frame in the first {duration_words(waited_s)}" if first else f"no new frame for {duration_words(waited_s)}"
+        else:
+            detail = f"down {duration_words(down or 0)}"
         print(f"{kind} | at {clock_words(when)} | {detail}", flush=True)
         append_record({"type": kind, "at": when.isoformat(timespec="seconds"), "downtime_s": round(down, 1) if down else None})
         if on_camera is not None:
             on_camera(kind, when, down)
-
-    settings_offline_s = CameraMonitor().offline_after_s
 
     def process(frame: np.ndarray, now: float, real_at: datetime) -> None:
         """One checked frame: read plates, update the rule and the timers, dispatch events."""
@@ -364,7 +365,7 @@ def run_live(settings: Settings, summary: Summary, process, camera_event, stop: 
     source = settings.source
     kind = "camera" if is_stream(source) else "file played live"
     print(f"source: {mask_source(source)} ({kind}; waiting for the first frame)")
-    frames = FrameSource(source, hold=test_hold())
+    frames = FrameSource(source, hold=test_hold(), say=lambda line: print(line, flush=True))
     monitor = CameraMonitor()
     clock = WatchedClock()
     frames.start()
@@ -385,7 +386,7 @@ def run_live(settings: Settings, summary: Summary, process, camera_event, stop: 
                 if frames.ended:
                     break
                 if monitor.tick(time.time()):
-                    camera_event(CAMERA_OFFLINE, datetime.now(timezone.utc), None)
+                    camera_event(CAMERA_OFFLINE, datetime.now(timezone.utc), None, monitor.waited_s, monitor.no_frame_yet)
                 continue
             frame, captured_at, seq = newest
             last_seq = seq

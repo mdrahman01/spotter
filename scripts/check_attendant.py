@@ -13,7 +13,7 @@ plate text and no alert messages.
 Required end state:
   ARRIVED, active booking: a stay opened at the event time, light green, a driver alert.
   ARRIVED, no booking:     no stay, light red, an owner alert.
-  ENDING_SOON:             a driver alert containing the time-left words.
+  ENDING_SOON:             a driver alert containing the time-left words code supplied.
   OVERSTAY:                light amber, a driver alert containing the fee amount, an owner alert.
   LEFT, open stay:         the stay closed at the last read with its departure snapshot, the
                            bill stored, a driver alert containing the total, light off; and if
@@ -47,6 +47,7 @@ CAMERA_EVENTS = ("CAMERA_OFFLINE", "CAMERA_BACK")
 
 CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b", re.IGNORECASE)
 ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?")
+TIME_LEFT = re.compile(r"less than a minute|about \d+ minutes?")  # the words time_left_words makes
 DURATION = re.compile(r"\b(\d+(?:\.\d+)?)[\s-]*(second|sec|minute|min|hour|hr|day)s?\b", re.IGNORECASE)
 UNITS = {"sec": "second", "min": "minute", "hr": "hour"}
 
@@ -159,8 +160,10 @@ def main() -> int:
                 required = [("no stay", not opened_here), ("light red", light == "red"), ("owner alert", has("owner"))]
                 expected_recipients = {"owner"}
         elif kind == "ENDING_SOON":
-            words = None
-            if stay:
+            # The words code supplied for this event (the run measures the time left at the exact
+            # sighting); only without a words row is it worked out from the event time, to the second.
+            words = next((w for w in supplied_words if TIME_LEFT.fullmatch(w)), None)
+            if words is None and stay:
                 ends_at = parse(db.booking(stay["booking_id"])["ends_at"])
                 words = time_left_words((ends_at - at).total_seconds())
             required = [(f"driver alert with the time left ({words})", words is not None and has("driver", words))]

@@ -43,7 +43,7 @@ class ClockWordsTest(unittest.TestCase):
         moment = now - timedelta(days=3)
         words = clock_words(moment, now)
         local = moment.astimezone()
-        self.assertTrue(words.startswith(f"{local.strftime('%a')} {local.day} {local.strftime('%b')}, "))
+        self.assertTrue(words.startswith(f"{local.strftime('%a %b')} {local.day}, "))
         self.assertRegex(words, r", \d{1,2}:\d{2} (am|pm)$")
 
     def test_no_leading_zero(self):

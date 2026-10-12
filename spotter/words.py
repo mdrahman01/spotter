@@ -10,13 +10,13 @@ from datetime import datetime, timezone
 
 
 def clock_words(moment: datetime, now: datetime | None = None) -> str:
-    """"6:02 pm", or "Thu 9 Oct, 6:02 pm" when the moment is not today, in local time."""
+    """"6:02 pm", or "Thu Oct 9, 6:02 pm" when the moment is not today, in local time."""
     local = moment.astimezone()
     time_text = local.strftime("%I:%M %p").lstrip("0").lower()
     today = (now or datetime.now(timezone.utc)).astimezone().date()
     if local.date() == today:
         return time_text
-    return f"{local.strftime('%a')} {local.day} {local.strftime('%b')}, {time_text}"
+    return f"{local.strftime('%a %b')} {local.day}, {time_text}"
 
 
 def _unit(count: int, name: str) -> str:

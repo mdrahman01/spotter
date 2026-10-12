@@ -26,6 +26,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON = sys.executable
 VIDEO = "samples/IMG_2472.mov"
+# The clip was recorded with these; .env now holds the real camera's zone and leave time.
+CLIP_ZONE = "0.35,0.27,0.69,0.69"
+CLIP_LEAVE_AFTER_S = "4"
 DRIVER = "Test Driver"
 RATE = "5.00"
 SCENARIOS = ("overstay", "booked", "unknown")
@@ -46,7 +49,8 @@ def main() -> int:
     args = parser.parse_args()
     plate = args.expect
     seed = [PYTHON, "-m", "spotter.seed", "--reset"]
-    watch = [PYTHON, "-m", "spotter.run", "--source", VIDEO, "--expect", plate]
+    watch = [PYTHON, "-m", "spotter.run", "--source", VIDEO, "--expect", plate,
+             "--zone", CLIP_ZONE, "--leave-after-s", CLIP_LEAVE_AFTER_S]
 
     if args.scenario == "overstay":
         base = datetime.now(timezone.utc).replace(microsecond=0)
