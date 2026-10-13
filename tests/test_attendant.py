@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from spotter.alerts import Alert, ConsoleAlerts
+from spotter.alerts import Alert, ConsoleAlerts, Delivery, PhotoResult
 from spotter.attendant import AFTER_REMINDER, BY_CODE, CLEAN, REMINDER_ROUNDS, Attendant
 from spotter.db import Database
 from spotter.events import Event, EventFrames
@@ -69,9 +69,31 @@ class FailingAlerts:
     def __init__(self):
         self.attempts: list[Alert] = []
 
-    def send(self, alert: Alert) -> str | None:
+    def send(self, alert: Alert) -> Delivery:
         self.attempts.append(alert)
-        return "URLError: simulated outage"
+        return Delivery("URLError: simulated outage")
+
+    def flush(self, timeout_s=0):
+        return []
+
+
+class QueueingAlerts(ConsoleAlerts):
+    """Like Telegram: the message is delivered at once and the photo's result comes with flush()."""
+
+    def __init__(self):
+        super().__init__(say=quiet)
+        self.queued: list[PhotoResult] = []
+
+    def send(self, alert: Alert) -> Delivery:
+        self.sent.append(alert)
+        if alert.attachments:
+            self.queued.append(PhotoResult(alert.to, alert.attachments, None, 99))
+            return Delivery(None, 42, "queued")
+        return Delivery(None, 42, "none")
+
+    def flush(self, timeout_s=0):
+        results, self.queued = self.queued, []
+        return results
 
 
 class DeadLight:
@@ -194,9 +216,11 @@ class FinishCheckTest(unittest.TestCase):
         self.assertIn("owner", told)
         self.assertIn("set the light to off", told)
         self.assertNotIn("driver", told)  # the driver alert with the total was delivered
-        self.assertEqual(scene.by_code(), ["send_alert", "set_light"])
+        self.assertTrue(told.index("set the light to off") < told.index("owner"))  # the light comes first
+        self.assertEqual(scene.by_code(), ["set_light", "send_alert"])
         owner = [a for a in scene.alerts.sent if a.to == "owner"][-1]
         self.assertIn("$6.00", owner.message)
+        self.assertIn("22 seconds", owner.message)  # how long it stayed
         self.assertEqual(owner.snapshot, "data/snapshots/last.jpg")
         self.assertEqual(scene.light.color, "off")
         session = scene.db.session(1)
@@ -206,11 +230,40 @@ class FinishCheckTest(unittest.TestCase):
         scene = Scene([[LOOKUP], "Done.", "Still nothing."])
         scene.db.start_session(PLATE, scene.booking, T0)
         scene.leave()
-        self.assertEqual(scene.by_code(), ["end_session", "compute_bill", "send_alert", "set_light"])
+        self.assertEqual(scene.by_code(), ["set_light", "end_session", "compute_bill", "send_alert", "send_alert"])
         session = scene.db.session(1)
         self.assertEqual((session["status"], session["amount_cents"], session["left_snapshot"]), ("closed", 100, "data/snapshots/last.jpg"))
-        self.assertIn("$1.00", scene.alerts.sent[-1].message)
+        driver, owner = scene.alerts.sent[-2:]
+        self.assertEqual((driver.to, owner.to), ("driver", "owner"))
+        self.assertIn("$1.00", driver.message)
+        self.assertIn("$1.00", owner.message)
+        self.assertIn("22 seconds", owner.message)
+        self.assertEqual(json.loads(scene.rows("end_session")[0]["result"])["stayed"], "22 seconds")
         self.assertEqual(scene.light.color, "off")
+
+    def test_a_booked_departure_needs_the_owner_told_the_stay_length_and_the_total(self):
+        scene = Scene([])
+        scene.db.start_session(PLATE, scene.booking, T0)
+        scene.model.script = [[LOOKUP], [("set_light", {"color": "off"})], [("end_session", {"plate": PLATE})], [("compute_bill", {"session_id": 1})],
+                              [("send_alert", {"to": "driver", "message": "Your stay has ended. The bill is $1.00."})],
+                              [("send_alert", {"to": "owner", "message": "The car has left after 22 seconds and was billed $1.00."})], "Done."]
+        scene.leave()
+        self.assertEqual(scene.rows("reminder"), [])
+        self.assertEqual(scene.by_code(), [])
+        self.assertEqual(scene.attendant.stats.finished[CLEAN], 1)
+
+    def test_queued_photos_are_waited_for_and_recorded_after_the_finish_check(self):
+        alerts = QueueingAlerts()
+        scene = Scene([[LOOKUP], [START], [GREEN], [WELCOME], "Done."], alerts=alerts)
+        scene.arrive()
+        welcome = json.loads(scene.rows("send_alert")[0]["result"])
+        self.assertEqual((welcome["delivered"], welcome["photo"]), (True, "queued"))
+        photos = scene.rows("photo")
+        self.assertEqual(len(photos), 1)
+        self.assertEqual(json.loads(photos[0]["arguments"]), {"to": "driver", "paths": [SNAP]})
+        self.assertEqual(json.loads(photos[0]["result"]), {"delivered": True, "message_id": 99, "error": None})
+        self.assertEqual((scene.attendant.stats.photos_sent, scene.attendant.stats.photos_failed), (1, 0))
+        self.assertEqual(scene.db.session(1)["arrival_snapshot"], SNAP)
 
     def test_a_light_that_does_not_respond_is_reported_once_and_the_owner_told_once(self):
         dead = DeadLight()
@@ -228,7 +281,7 @@ class FinishCheckTest(unittest.TestCase):
         scene.model.script = [[LOOKUP], [("end_session", {"plate": PLATE})], [("compute_bill", {"session_id": 1})],
                               [("send_alert", {"to": "driver", "message": "Your stay has ended. The bill is $1.00."})], "Done.", "Nothing more."]
         scene.leave()
-        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "owner"]), 1)
+        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "owner" and "not responding" in a.message]), 1)
         self.assertEqual(scene.attendant.stats.finished[BY_CODE], 2)
 
     def test_the_model_is_given_times_as_words_and_they_are_recorded(self):

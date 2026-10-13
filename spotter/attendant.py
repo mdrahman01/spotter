@@ -59,8 +59,8 @@ Rules:
 3. ARRIVED with anything else (no booking, or outside its window): set_light red, then send_alert to the owner saying that an unbooked car is in the spot and that a photo is attached. Do not suggest contacting the driver.
 4. ENDING_SOON: send_alert to the driver saying how much time is left, in the words of time_left in the event.
 5. OVERSTAY: set_light amber, send_alert to the driver that the booking has ended and an overstay fee of overstay_fee (in the event) now applies, and send_alert to the owner that the car is overstaying.
-6. LEFT with an open stay: end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when the bill has an overstay fee; if the stay had overstayed, also send_alert to the owner that the car has gone and what was billed; then set_light off.
-7. LEFT with no open stay: send_alert to the owner that the car has gone and how long it stayed (stayed_for in the event), then set_light off.
+6. LEFT with an open stay: set_light off first, before anything else. Then end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when the bill has an overstay fee, and send_alert to the owner that the car has left, how long it stayed (stayed from end_session) and the total billed.
+7. LEFT with no open stay: set_light off first, then send_alert to the owner that the car has gone and how long it stayed (stayed_for in the event).
 8. When done, reply with one short sentence listing what you did, and make no more tool calls.
 """
 
@@ -83,6 +83,8 @@ class Stats:
     reminders: int = 0
     code_items: int = 0
     undeliverable: int = 0
+    photos_sent: int = 0
+    photos_failed: int = 0
     finished: Counter = field(default_factory=Counter)  # CLEAN / AFTER_REMINDER / BY_CODE
     finish_lines: list[str] = field(default_factory=list)  # one per event, for the summary
 
@@ -184,6 +186,8 @@ class Attendant:
             payload["booking_ended"] = words.clock(ends_at, at)
             payload["ended_ago"] = words.duration((at - ends_at).total_seconds())
             payload["overstay_fee"] = dollars(self.overstay_fee_cents)
+        if event.type == "OVERSTAY" and expected.stay:
+            self.db.set_overstay_snapshot(expected.stay["id"], frames.snapshot)  # the photo a dispute is answered with
         say(f"=== {event.type} {self.masker.label(event.plate)} at {iso(at)} ===")
 
         messages = [
@@ -206,6 +210,7 @@ class Attendant:
             self._complete(missing)
             how = BY_CODE
         self.stats.finished[how] += 1
+        self._record_photos()
         self._record("words", {"supplied": self._words.supplied}, {"count": len(self._words.supplied)}, quiet=True)
         self._record(
             "finish",
@@ -220,6 +225,18 @@ class Attendant:
             detail = f": {'; '.join(done_by_code)}"
         say(f"FINISH: {how}{detail}")
         self.stats.finish_lines.append(f"{event.type} {how}{detail}")
+
+    def _record_photos(self) -> None:
+        """Wait for the photos queued behind this event's messages and record how each went."""
+        for photo in self.alerts.flush():
+            self.stats.photos_sent += photo.delivered
+            self.stats.photos_failed += not photo.delivered
+            self._record(
+                "photo",
+                {"to": photo.to, "paths": list(photo.paths)},
+                {"delivered": photo.delivered, "message_id": photo.message_id, "error": photo.error},
+                quiet=photo.delivered,
+            )
 
     def _expected(self, event: Event, frames: EventFrames) -> Expected:
         stay = self.db.open_session(event.plate)
@@ -405,6 +422,7 @@ class Attendant:
                 lambda: "The car is overstaying.",
             )
         elif expected.kind == "LEFT":
+            want_light("off")  # first: the light never waits for a message
             if expected.stay:
                 session = self.db.session(expected.stay["id"])
                 if session["status"] != "closed":
@@ -418,13 +436,12 @@ class Attendant:
                     total or "\0",  # no bill yet: nothing can have given its total
                     lambda: self._bill_text(expected, for_owner=False),
                 )
-                if expected.overstayed:
-                    want_alert(
-                        "owner",
-                        "send the owner an alert that the car has gone and what was billed",
-                        total or "\0",
-                        lambda: self._bill_text(expected, for_owner=True),
-                    )
+                want_alert(
+                    "owner",
+                    "send the owner an alert that the car has left, how long it stayed and what was billed",
+                    total or "\0",
+                    lambda: self._bill_text(expected, for_owner=True),
+                )
             else:
                 stayed = expected.stayed_for or "a while"
                 want_alert(
@@ -433,7 +450,6 @@ class Attendant:
                     None,
                     lambda: f"The car has gone after {stayed}.",
                 )
-            want_light("off")
         return items
 
     def _remind(self, messages: list[dict], kind: str, missing: list[Missing]) -> None:
@@ -485,19 +501,18 @@ class Attendant:
         if to == "driver":
             booking = self.db.latest_booking(context.plate)
             name = booking["driver"] if booking else None
-        error = self.alerts.send(Alert(to, name, text, context.attachment))
-        delivered = error is None
-        self.stats.undeliverable += not delivered
-        self._alerts.append((to, text, delivered))
+        delivery = self.alerts.send(Alert(to, name, text, context.attachment))
+        self.stats.undeliverable += not delivery.delivered
+        self._alerts.append((to, text, delivery.delivered))
         self._record(
             "send_alert",
             {"to": to, "message": text, "by": "code"},
-            {"sent_to": to, "name": name, "snapshot": context.attachment, "delivered": delivered,
-             "delivery_error": error, "by": "code"},
+            {"sent_to": to, "name": name, "snapshot": context.attachment, "delivered": delivery.delivered,
+             "delivery_error": delivery.error, "photo": delivery.photos, "by": "code"},
         )
 
     def _fix_start(self, expected: Expected, context: EventContext) -> None:
-        session_id = self.db.start_session(expected.plate, expected.booking["id"], context.at)
+        session_id = self.db.start_session(expected.plate, expected.booking["id"], context.at, context.snapshot)
         self._record(
             "start_session",
             {"by": "code"},
@@ -506,10 +521,11 @@ class Attendant:
 
     def _fix_close(self, expected: Expected, context: EventContext) -> None:
         self.db.close_session(expected.stay["id"], context.departed_at, context.attachment)
+        stayed = self._words.duration((context.departed_at - parse(expected.stay["arrived_at"])).total_seconds())
         self._record(
             "end_session",
             {"by": "code"},
-            {"session_id": expected.stay["id"], "left_at": iso(context.departed_at), "status": "closed", "by": "code"},
+            {"session_id": expected.stay["id"], "left_at": iso(context.departed_at), "stayed": stayed, "status": "closed", "by": "code"},
         )
 
     def _fix_bill(self, expected: Expected) -> None:
@@ -527,7 +543,8 @@ class Attendant:
             return "The car has gone; the bill could not be computed." if for_owner else "Your stay has ended."
         total = dollars(session["amount_cents"])
         if for_owner:
-            return f"The car has gone and was billed {total}."
+            stayed = self._words.duration((parse(session["left_at"]) - parse(session["arrived_at"])).total_seconds())
+            return f"The car has left after {stayed} and was billed {total}."
         if session["overstayed_at"]:
             fee = dollars(self.overstay_fee_cents)
             parking = dollars(session["amount_cents"] - self.overstay_fee_cents)
@@ -552,6 +569,8 @@ class Attendant:
         )
         for number, line in enumerate(s.finish_lines, 1):
             print(f"  event {number}: {line}")
+        if s.photos_sent or s.photos_failed:
+            print(f"photos sent after the messages: {s.photos_sent} delivered, {s.photos_failed} not delivered")
         if s.latencies:
             print(
                 f"model latency: avg {sum(s.latencies) / len(s.latencies):.2f}s,"

@@ -188,7 +188,7 @@ class FrameSource:
                 self.failed_opens += 1
                 wait = RETRY_WAITS_S[min(attempt, len(RETRY_WAITS_S) - 1)]
                 attempt += 1
-                self.say(f"source not reachable (attempt {attempt}); retrying in {wait}s")
+                self.say(f"source not reachable (attempt {attempt}) at {time.strftime('%H:%M:%S')}; retrying in {wait}s")
                 self._sleep(wait)
                 continue
             attempt = 0
@@ -221,4 +221,4 @@ class FrameSource:
             self._sleep(RETRY_WAITS_S[0])
             if self._stop.is_set():  # we closed it; not a drop
                 return
-            self.say("stream dropped; reconnecting")
+            self.say(f"stream dropped at {time.strftime('%H:%M:%S')}; reconnecting")

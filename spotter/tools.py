@@ -162,7 +162,8 @@ TOOL_SCHEMAS = [
     ),
     _tool(
         "send_alert",
-        "Send a message to the owner or to the booked driver. The event's snapshot photo is attached by the code.",
+        "Send a message to the owner or to the booked driver. The message goes at once; the event's "
+        "snapshot photo is sent right after it by the code.",
         {
             "to": {"type": "string", "enum": ["owner", "driver"]},
             "message": {"type": "string", "description": "One or two sentences."},
@@ -261,7 +262,7 @@ class Toolbox:
         booking = self.db.booking_at(self.event.plate, self.event.at)
         if booking is None:
             return {"error": "no booking covers this plate at this time, so a stay cannot start"}
-        session_id = self.db.start_session(self.event.plate, booking["id"], self.event.at)
+        session_id = self.db.start_session(self.event.plate, booking["id"], self.event.at, self.event.snapshot)
         return {
             "session_id": session_id,
             "booking_id": booking["id"],
@@ -323,11 +324,12 @@ class Toolbox:
             if booking is None:
                 return {"error": "no booking for this plate, so there is no driver to alert"}
             name = booking["driver"]
-        error = self.alerts.send(Alert(to, name, message.strip(), self.event.attachment))
+        delivery = self.alerts.send(Alert(to, name, message.strip(), self.event.attachment))
         return {
             "sent_to": to,
             "name": name,
             "snapshot": self.event.attachment,
-            "delivered": error is None,
-            "delivery_error": error,
+            "delivered": delivery.delivered,
+            "delivery_error": delivery.error,
+            "photo": delivery.photos,  # "attached" now, "queued" to follow the message, or "none"
         }

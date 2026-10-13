@@ -31,7 +31,9 @@ from spotter import watch
 from spotter.alerts import Alert, TelegramSetupError, make_alerts
 from spotter.attendant import BASE_URL, Attendant
 from spotter.db import Database, iso
+from spotter.dispute import DisputeAgent, GoodwillRule
 from spotter.events import Event
+from spotter.inbox import TelegramInbox
 from spotter.light import LightError, make_light
 from spotter.timers import StayTimer
 from spotter.words import clock_words, duration_words
@@ -102,6 +104,30 @@ def main() -> int:
     )
     timer = StayTimer(db, settings.ending_soon_s, settings.overstay_grace_s)
 
+    # Driver messages come in on their own thread and are answered there, with a
+    # database connection of their own; the watcher never waits for them.
+    inbox = None
+    if settings.alerts == "telegram":
+        rule = GoodwillRule(settings.waive_fees, settings.waive_within_min, settings.overstay_fee_cents)
+
+        def answer_message(text: str, received_at: datetime) -> None:
+            own_db = Database()
+            try:
+                DisputeAgent(client, own_db, alerts, masker, rule, settings.overstay_grace_s).handle(text, received_at)
+            finally:
+                own_db.close()
+
+        try:
+            inbox = TelegramInbox.from_env(answer_message, masker.print)
+        except TelegramSetupError as err:
+            print(f"Telegram inbox cannot start: {err}", file=sys.stderr)
+            return 2
+        inbox.start()
+        print(
+            "inbox: text messages from your Telegram chat are answered as the driver of the last closed stay"
+            f" | goodwill rule: waiving {'on' if settings.waive_fees else 'off'}, within {settings.waive_within_min:g} minutes"
+        )
+
     def timers(now: float, real_time: datetime, plates: set[str]) -> list[Event]:
         return [Event(t.type, t.plate, now, now, now, 0) for t in timer.check(real_time, plates)]
 
@@ -111,14 +137,14 @@ def main() -> int:
             text = f"Camera offline: no frames since {clock_words(when)}. Stays and the light are left as they are."
         else:
             text = f"Camera back after {duration_words(down or 0)}."
-        error = alerts.send(Alert("owner", None, text, ""))
+        delivery = alerts.send(Alert("owner", None, text, ""))
         logged_event = {"type": kind, "time": iso(when)}
         db.log_action(logged_event, "camera", {"downtime_s": round(down, 1) if down else None}, {"by": "code"})
         db.log_action(
             logged_event,
             "send_alert",
             {"to": "owner", "message": text, "by": "code"},
-            {"sent_to": "owner", "delivered": error is None, "delivery_error": error, "by": "code"},
+            {"sent_to": "owner", "delivered": delivery.delivered, "delivery_error": delivery.error, "by": "code"},
         )
 
     try:
@@ -129,6 +155,9 @@ def main() -> int:
         print(err, file=sys.stderr)
         return 2
     finally:
+        if inbox is not None:
+            inbox.stop()
+        alerts.close()  # photos still uploading get their chance
         db.close()
     watch.print_summary(summary, masker)
     attendant.print_stats()

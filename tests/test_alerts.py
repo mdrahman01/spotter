@@ -31,9 +31,10 @@ def quiet(line: str) -> None:
 class FakeTelegram:
     """Records what would have been posted and answers like the Bot API."""
 
-    def __init__(self, ok=True, raise_error=None):
+    def __init__(self, ok=True, raise_error=None, photos_ok=True):
         self.ok = ok
         self.raise_error = raise_error
+        self.photos_ok = photos_ok
         self.posts: list[tuple[str, bytes, str]] = []
 
     def __call__(self, url, body, content_type):
@@ -42,7 +43,16 @@ class FakeTelegram:
             raise self.raise_error
         if not self.ok:
             return {"ok": False, "description": "Bad Request: chat not found"}
-        return {"ok": True, "result": {"message_id": 42}}
+        if url.endswith("/sendMediaGroup"):
+            if not self.photos_ok:
+                return {"ok": False, "description": "Bad Request: media too large"}
+            return {"ok": True, "result": [{"message_id": 43}, {"message_id": 44}]}
+        if url.endswith("/sendPhoto") and not self.photos_ok:
+            return {"ok": False, "description": "Bad Request: photo too large"}
+        return {"ok": True, "result": {"message_id": 42 if url.endswith("/sendMessage") else 43}}
+
+    def methods(self) -> list[str]:
+        return [url.rsplit("/", 1)[1] for url, _, _ in self.posts]
 
 
 def write_image(directory: Path, name: str, width: int, height: int) -> str:
@@ -91,42 +101,84 @@ class TelegramAlertTest(unittest.TestCase):
     def alerts(self, fake):
         return TelegramAlert(TOKEN, 7, say=quiet, post=fake, repo_root=self.root)
 
-    def test_photo_with_caption_when_there_is_a_snapshot(self):
+    def test_the_message_goes_first_as_text_and_the_photo_follows(self):
         fake = FakeTelegram()
-        error = self.alerts(fake).send(Alert("owner", None, "An unbooked car is in the spot.", "data/snap.jpg"))
-        self.assertIsNone(error)
-        url, body, content_type = fake.posts[0]
-        self.assertTrue(url.endswith("/sendPhoto"))
+        telegram = self.alerts(fake)
+        delivery = telegram.send(Alert("owner", None, "An unbooked car is in the spot.", "data/snap.jpg"))
+        self.assertTrue(delivery.delivered)
+        self.assertEqual((delivery.message_id, delivery.photos), (42, "queued"))
+        url, body, content_type = fake.posts[0]  # the text is already there when send() returns
+        self.assertTrue(url.endswith("/sendMessage"))
         self.assertIn(TOKEN, url)  # the token belongs in the URL, and nowhere printed
+        self.assertEqual(json.loads(body), {"chat_id": "7", "text": "Owner: An unbooked car is in the spot."})
+        results = telegram.flush()
+        self.assertEqual(fake.methods(), ["sendMessage", "sendPhoto"])
+        url, body, content_type = fake.posts[1]
         self.assertTrue(content_type.startswith("multipart/form-data"))
-        self.assertIn(b"Owner: An unbooked car is in the spot.", body)
+        self.assertIn(b"Owner: photo", body)
         photo = body.split(b"Content-Type: image/jpeg\r\n\r\n")[1].rsplit(b"\r\n--", 1)[0]
         decoded = cv2.imdecode(np.frombuffer(photo, np.uint8), cv2.IMREAD_COLOR)
         self.assertEqual(decoded.shape[1], 1280)
+        self.assertEqual([(r.to, r.paths, r.delivered, r.message_id) for r in results], [("owner", ("data/snap.jpg",), True, 43)])
+        self.assertEqual(telegram.flush(), [])  # reported once
+        telegram.close()
 
-    def test_text_when_there_is_no_snapshot_or_it_is_missing(self):
+    def test_several_photos_go_as_one_album(self):
+        write_image(self.root / "data", "two.jpg", 640, 480)
         fake = FakeTelegram()
         telegram = self.alerts(fake)
-        telegram.send(Alert("driver", "Dana", "Welcome.", ""))
-        telegram.send(Alert("driver", "Dana", "Welcome.", "data/gone.jpg"))
-        for url, body, content_type in fake.posts:
-            self.assertTrue(url.endswith("/sendMessage"))
-            self.assertEqual(content_type, "application/json")
-            self.assertEqual(json.loads(body), {"chat_id": "7", "text": "Driver: Welcome."})
+        delivery = telegram.send(Alert("driver", "Dana", "Here is the proof.", "data/snap.jpg", ("data/two.jpg", "data/snap.jpg", "data/gone.jpg")))
+        self.assertEqual(delivery.photos, "queued")
+        results = telegram.flush()
+        self.assertEqual(fake.methods(), ["sendMessage", "sendMediaGroup"])
+        body = fake.posts[1][1]
+        self.assertEqual(body.count(b"Content-Type: image/jpeg"), 2)  # the missing file is left out, duplicates once
+        self.assertIn(b"attach://photo0", body)
+        self.assertEqual(results[0].paths, ("data/snap.jpg", "data/two.jpg", "data/gone.jpg"))
+        self.assertTrue(results[0].delivered)
+        telegram.close()
+
+    def test_text_only_when_there_is_no_snapshot(self):
+        fake = FakeTelegram()
+        telegram = self.alerts(fake)
+        delivery = telegram.send(Alert("driver", "Dana", "Welcome.", ""))
+        self.assertEqual((delivery.delivered, delivery.photos), (True, "none"))
+        self.assertEqual(telegram.flush(), [])
+        self.assertEqual(fake.methods(), ["sendMessage"])
+
+    def test_a_missing_snapshot_is_a_photo_failure_not_a_message_failure(self):
+        fake = FakeTelegram()
+        telegram = self.alerts(fake)
+        delivery = telegram.send(Alert("driver", "Dana", "Welcome.", "data/gone.jpg"))
+        self.assertTrue(delivery.delivered)
+        results = telegram.flush()
+        self.assertEqual(fake.methods(), ["sendMessage"])
+        self.assertFalse(results[0].delivered)
+        self.assertIn("no readable photo", results[0].error)
 
     def test_failures_are_reported_without_raising_or_leaking_the_token(self):
         rejected = self.alerts(FakeTelegram(ok=False))
-        error = rejected.send(Alert("owner", None, "hi", "data/snap.jpg"))
-        self.assertIn("chat not found", error)
-        boom = FakeTelegram(raise_error=OSError(f"connection refused for https://api.telegram.org/bot{TOKEN}/sendPhoto"))
+        delivery = rejected.send(Alert("owner", None, "hi", "data/snap.jpg"))
+        self.assertFalse(delivery.delivered)
+        self.assertIn("chat not found", delivery.error)
+        self.assertEqual(rejected.flush(), [])  # no photo is queued behind a message that failed
+        boom = FakeTelegram(raise_error=OSError(f"connection refused for https://api.telegram.org/bot{TOKEN}/sendMessage"))
         printed = []
         broken = TelegramAlert(TOKEN, 7, say=printed.append, post=boom, repo_root=self.root)
-        error = broken.send(Alert("owner", None, "hi", "data/snap.jpg"))
-        self.assertTrue(error.startswith("OSError:"))
-        self.assertNotIn(TOKEN, error)
+        delivery = broken.send(Alert("owner", None, "hi", "data/snap.jpg"))
+        self.assertTrue(delivery.error.startswith("OSError:"))
+        self.assertNotIn(TOKEN, delivery.error)
         self.assertNotIn(TOKEN, "".join(printed))
         self.assertEqual(len(broken.failed), 1)
         self.assertEqual(broken.sent, [])
+        photo_fails = FakeTelegram(photos_ok=False)
+        printed = []
+        telegram = TelegramAlert(TOKEN, 7, say=printed.append, post=photo_fails, repo_root=self.root)
+        self.assertTrue(telegram.send(Alert("owner", None, "hi", "data/snap.jpg")).delivered)
+        results = telegram.flush()
+        self.assertFalse(results[0].delivered)
+        self.assertIn("photo too large", results[0].error)
+        self.assertNotIn(TOKEN, "".join(printed))
 
     def test_chat_id_comes_from_the_latest_private_chat(self):
         updates = {"ok": True, "result": [
@@ -139,6 +191,22 @@ class TelegramAlertTest(unittest.TestCase):
         with self.assertRaises(TelegramSetupError) as caught:
             find_chat_id(TOKEN, fetch=lambda url: {"ok": False, "description": "Unauthorized"})
         self.assertIn("Unauthorized", str(caught.exception))
+
+
+class ConsoleAlertsTest(unittest.TestCase):
+    def test_console_prints_the_photos_with_the_message(self):
+        printed = []
+        console = ConsoleAlerts(say=printed.append)
+        delivery = console.send(Alert("owner", None, "Look.", "data/a.jpg", ("data/b.jpg",)))
+        self.assertEqual((delivery.delivered, delivery.photos), (True, "attached"))
+        self.assertEqual(printed, ["ALERT to owner: Look. [photos: data/a.jpg, data/b.jpg]"])
+        self.assertEqual(console.send(Alert("driver", "Dana", "Hi.", "")).photos, "none")
+        self.assertEqual(console.flush(), [])
+
+    def test_attachments_are_the_snapshot_first_then_the_photos_at_most_three(self):
+        alert = Alert("owner", None, "x", "s.jpg", ("a.jpg", "s.jpg", "b.jpg", "c.jpg"))
+        self.assertEqual(alert.attachments, ("s.jpg", "a.jpg", "b.jpg"))
+        self.assertEqual(Alert("owner", None, "x", "").attachments, ())
 
 
 class BackendChoiceTest(unittest.TestCase):

@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from spotter.alerts import Alert, ConsoleAlerts
+from spotter.alerts import Alert, ConsoleAlerts, Delivery
 from spotter.db import Database
 from spotter.light import ConsoleLight
 from spotter.tools import EventContext, Toolbox, bill_cents, public
@@ -22,8 +22,11 @@ def quiet(line: str) -> None:
 class FailingAlerts:
     """An alerts backend whose every send fails, as Telegram would without a network."""
 
-    def send(self, alert: Alert) -> str | None:
-        return "URLError: simulated outage"
+    def send(self, alert: Alert) -> Delivery:
+        return Delivery("URLError: simulated outage")
+
+    def flush(self, timeout_s=0):
+        return []
 
 
 class Scene:
@@ -249,7 +252,7 @@ class ToolRulesTest(unittest.TestCase):
         owner = scene.tools.send_alert("owner", "Unknown car in the driveway.")
         self.assertEqual(
             owner,
-            {"sent_to": "owner", "name": None, "snapshot": SNAPSHOT, "delivered": True, "delivery_error": None},
+            {"sent_to": "owner", "name": None, "snapshot": SNAPSHOT, "delivered": True, "delivery_error": None, "photo": "attached"},
         )
         driver = scene.tools.send_alert("driver", "Welcome.")
         self.assertEqual(driver["name"], "Dana Driver")

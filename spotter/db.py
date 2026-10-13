@@ -27,7 +27,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     amount_cents INTEGER,
     ending_soon_at TEXT,
     overstayed_at TEXT,
-    left_snapshot TEXT
+    fee_began_at TEXT,
+    left_snapshot TEXT,
+    arrival_snapshot TEXT,
+    overstay_snapshot TEXT,
+    fee_waived_at TEXT,
+    waiver_reason TEXT,
+    waived_cents INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_session_per_plate
     ON sessions (plate) WHERE status = 'open';
@@ -63,12 +69,16 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
-        # Databases created before the timer events and the departure snapshot
-        # lack these columns.
+        # Databases created before the timer events, the snapshots and the fee
+        # waiver lack these columns.
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(sessions)")}
-        for column in ("ending_soon_at", "overstayed_at", "left_snapshot"):
+        for column, kind in (
+            ("ending_soon_at", "TEXT"), ("overstayed_at", "TEXT"), ("fee_began_at", "TEXT"), ("left_snapshot", "TEXT"),
+            ("arrival_snapshot", "TEXT"), ("overstay_snapshot", "TEXT"),
+            ("fee_waived_at", "TEXT"), ("waiver_reason", "TEXT"), ("waived_cents", "INTEGER"),
+        ):
             if column not in columns:
-                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT")
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} {kind}")
         self.conn.commit()
 
     def reset(self) -> None:
@@ -127,15 +137,19 @@ class Database:
     def sessions(self) -> list[dict]:
         return self._all("SELECT * FROM sessions ORDER BY id")
 
-    def start_session(self, plate: str, booking_id: int, arrived_at: datetime) -> int:
-        """Open a stay. Raises sqlite3.IntegrityError if the plate already has one open."""
+    def start_session(self, plate: str, booking_id: int, arrived_at: datetime, snapshot: str | None = None) -> int:
+        """Open a stay, keeping the arrival frame. Raises sqlite3.IntegrityError if the plate already has one open."""
         with self.conn:
             cursor = self.conn.execute(
-                "INSERT INTO sessions (plate, booking_id, arrived_at, status)"
-                " VALUES (?, ?, ?, 'open')",
-                (plate, booking_id, iso(arrived_at)),
+                "INSERT INTO sessions (plate, booking_id, arrived_at, status, arrival_snapshot)"
+                " VALUES (?, ?, ?, 'open', ?)",
+                (plate, booking_id, iso(arrived_at), snapshot),
             )
         return cursor.lastrowid
+
+    def latest_closed_session(self) -> dict | None:
+        """The stay that ended most recently, if any: the one a driver's message is about."""
+        return self._one("SELECT * FROM sessions WHERE status = 'closed' ORDER BY left_at DESC, id DESC LIMIT 1")
 
     def close_session(self, session_id: int, left_at: datetime, snapshot: str | None = None) -> None:
         """Close a stay at `left_at`, keeping the path of the frame that last showed the car."""
@@ -155,12 +169,32 @@ class Database:
                 "UPDATE sessions SET ending_soon_at = ? WHERE id = ?", (iso(at), session_id)
             )
 
-    def mark_overstayed(self, session_id: int, at: datetime) -> None:
-        """Record that the stay overstayed its booking; compute_bill then adds the fee."""
+    def mark_overstayed(self, session_id: int, at: datetime, fee_began: datetime | None = None) -> None:
+        """Record that the stay overstayed its booking at the sighting `at`, and when the fee began
+        (the booking's end plus the grace period); compute_bill then adds the fee."""
         with self.conn:
             self.conn.execute(
-                "UPDATE sessions SET overstayed_at = ? WHERE id = ?", (iso(at), session_id)
+                "UPDATE sessions SET overstayed_at = ?, fee_began_at = ? WHERE id = ?",
+                (iso(at), iso(fee_began) if fee_began else None, session_id),
             )
+
+    def set_overstay_snapshot(self, session_id: int, snapshot: str) -> None:
+        """Keep the frame of the overstay sighting: the photo a dispute is answered with."""
+        with self.conn:
+            self.conn.execute("UPDATE sessions SET overstay_snapshot = ? WHERE id = ?", (snapshot, session_id))
+
+    def waive_fee(self, session_id: int, at: datetime, reason: str, cents: int) -> None:
+        """Take the overstay fee off a closed stay's bill and record why: the only way money changes after billing."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE sessions SET fee_waived_at = ?, waiver_reason = ?, waived_cents = ?,"
+                " amount_cents = amount_cents - ? WHERE id = ?",
+                (iso(at), reason, cents, cents, session_id),
+            )
+
+    def fee_waived_before(self, plate: str) -> bool:
+        """Has this plate ever had a fee waived? The goodwill rule allows it once."""
+        return self._one("SELECT id FROM sessions WHERE plate = ? AND fee_waived_at IS NOT NULL LIMIT 1", plate) is not None
 
     def set_amount(self, session_id: int, amount_cents: int) -> None:
         with self.conn:

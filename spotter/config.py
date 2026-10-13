@@ -73,6 +73,14 @@ class Settings:
     light_brightness: int = field(
         default=100, metadata={"help": "brightness of the bulb's colours, 1 to 100"}
     )
+    waive_fees: bool = field(
+        default=False,
+        metadata={"help": "goodwill rule: may a disputed overstay fee be waived (on/off)"},
+    )
+    waive_within_min: float = field(
+        default=10,
+        metadata={"help": "goodwill rule: the car's last read must be within this many minutes of the fee beginning"},
+    )
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -99,6 +107,8 @@ class Settings:
             raise ValueError(f"light must be one of {', '.join(LIGHT_KINDS)}, got {self.light!r}")
         if not 1 <= self.light_brightness <= 100:
             raise ValueError("light_brightness must be between 1 and 100")
+        if self.waive_within_min < 0:
+            raise ValueError("waive_within_min must not be negative")
 
 
 def parse_zone(text: str) -> Zone:
@@ -107,6 +117,15 @@ def parse_zone(text: str) -> Zone:
         raise ValueError(f"zone needs four numbers x0,y0,x1,y1, got {text!r}")
     x0, y0, x1, y1 = (float(part) for part in parts)
     return x0, y0, x1, y1
+
+
+def parse_bool(text: str) -> bool:
+    value = text.strip().lower()
+    if value in ("on", "true", "yes", "1"):
+        return True
+    if value in ("off", "false", "no", "0"):
+        return False
+    raise ValueError(f"expected on or off, got {text!r}")
 
 
 PARSERS: dict[str, Callable[[str], object]] = {
@@ -125,6 +144,8 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "light": str.lower,
     "light_host": str,
     "light_brightness": int,
+    "waive_fees": parse_bool,
+    "waive_within_min": float,
 }
 
 

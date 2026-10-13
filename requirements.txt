@@ -3,3 +3,4 @@ python-dotenv
 fast-alpr[onnx]
 opencv-python
 python-kasa
+pillow

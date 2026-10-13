@@ -16,9 +16,13 @@ Required end state:
   ENDING_SOON:             a driver alert containing the time-left words code supplied.
   OVERSTAY:                light amber, a driver alert containing the fee amount, an owner alert.
   LEFT, open stay:         the stay closed at the last read with its departure snapshot, the
-                           bill stored, a driver alert containing the total, light off; and if
-                           the stay overstayed, an owner alert containing the total.
+                           bill stored, a driver alert containing the total, an owner alert
+                           containing how long the car stayed and the total, light off.
   LEFT, no stay:           an owner alert, light off.
+For every LEFT the seconds from the last read to the light going off are
+reported, and a note is made when a message went out before the light changed
+(the rule is light first). Photos follow the messages from a background
+thread; one that was not delivered is noted.
 Wording: in booked and overstay no closing sentence or alert may call the car
 unbooked; in booked no alert may mention an overstay; and no alert may state a
 clock time or a duration that code did not supply for that event (the "words"
@@ -32,6 +36,7 @@ import json
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,6 +45,7 @@ from spotter import config  # noqa: E402
 from spotter.db import Database, parse  # noqa: E402
 from spotter.timers import time_left_words  # noqa: E402
 from spotter.tools import dollars  # noqa: E402
+from spotter.words import duration_words  # noqa: E402
 
 SCENARIOS = ("booked", "unknown", "overstay")
 OVERSTAY_EVENTS = ["ARRIVED", "ENDING_SOON", "OVERSTAY", "LEFT"]
@@ -105,6 +111,9 @@ def main() -> int:
             continue
         alerts, reminders, code_items, errors = [], 0, 0, []
         supplied_words: list[str] = []
+        stayed_words: str | None = None  # from end_session: how long the car stayed, as code put it
+        light_off_at: datetime | None = None  # LEFT: when the light went off
+        message_before_light = False
         for row in group["rows"]:
             result = load_json(row["result"])
             arguments = load_json(row["arguments"])
@@ -124,6 +133,10 @@ def main() -> int:
             if tool == "model":
                 model_problems.append((kind, result.get("error")))
                 continue
+            if tool == "photo":
+                if not result.get("delivered"):
+                    notes.append(f"{kind}: photos for the {arguments.get('to')} not delivered: {result.get('error')}")
+                continue
             if "error" in result:
                 errors.append((tool, result["error"]))
                 continue
@@ -131,13 +144,19 @@ def main() -> int:
             if tool == "set_light":
                 light = arguments.get("color") or result.get("light")
                 light_sequence.append(light)
+                if kind == "LEFT" and light == "off" and light_off_at is None:
+                    light_off_at = parse(row["time"])
             elif tool == "send_alert":
                 message = arguments.get("message") or ""
                 alerts.append((arguments.get("to"), message, bool(result.get("delivered"))))
                 texts.append(message)
                 alert_texts.append(message)
+                if kind == "LEFT" and light_off_at is None:
+                    message_before_light = True
             elif tool == "compute_bill":
                 bills.append(result)
+            elif tool == "end_session":
+                stayed_words = result.get("stayed")
 
         delivered = [(to, message) for to, message, ok in alerts if ok]
 
@@ -179,21 +198,30 @@ def main() -> int:
             last_read = event.get("last_read_at")
             if stay and (stay["left_at"] is None or stay["left_at"] >= (last_read or event["time"])):
                 total = dollars(stay["amount_cents"]) if stay["amount_cents"] is not None else None
+                if stayed_words is None and stay["left_at"]:
+                    stayed_words = duration_words((parse(stay["left_at"]) - parse(stay["arrived_at"])).total_seconds())
                 required = [
                     ("stay closed", stay["status"] == "closed"),
                     ("left_at is the last read", stay["left_at"] == last_read),
                     ("departure snapshot stored", bool(stay["left_snapshot"])),
                     ("bill stored", total is not None),
                     (f"driver alert with the total {total}", total is not None and has("driver", total)),
+                    (f"owner alert with the stay length ({stayed_words}) and the total {total}",
+                     total is not None and stayed_words is not None and has("owner", total) and has("owner", stayed_words)),
                     ("light off", light == "off"),
                 ]
-                expected_recipients = {"driver"}
-                if stay["overstayed_at"]:
-                    required.append((f"owner alert with the total {total}", total is not None and has("owner", total)))
-                    expected_recipients.add("owner")
+                expected_recipients = {"driver", "owner"}
             else:
                 required = [("owner alert", has("owner")), ("light off", light == "off")]
                 expected_recipients = {"owner"}
+            if light_off_at is not None and last_read:
+                seconds = (light_off_at - parse(last_read)).total_seconds()
+                if seconds >= 0:
+                    notes.append(f"LEFT: last read to light off {seconds:.0f}s")
+                else:
+                    notes.append("LEFT: last read to light off not measured (a replay runs faster than real time)")
+            if message_before_light:
+                notes.append("LEFT: a message went out before the light changed (the rule is light first)")
 
         allowed = set().union(*(time_tokens(words) for words in supplied_words)) if supplied_words else set()
         stated = set().union(*(time_tokens(message) for _, message, _ in alerts)) if alerts else set()

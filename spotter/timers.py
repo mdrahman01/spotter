@@ -10,7 +10,7 @@ as overstayed at the time of that read. The model never decides that.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from spotter.db import Database, parse
 
@@ -68,6 +68,7 @@ class StayTimer:
                 if kind == ENDING_SOON:
                     self.db.mark_ending_soon(session["id"], now)
                 else:
-                    self.db.mark_overstayed(session["id"], now)
+                    fee_began = parse(booking["ends_at"]) + timedelta(seconds=self.overstay_grace_s)
+                    self.db.mark_overstayed(session["id"], now, fee_began)
                 events.append(TimerEvent(kind, session["plate"], session["id"], parse(booking["ends_at"])))
         return events
