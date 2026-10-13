@@ -353,13 +353,17 @@ class SceneWatch:
             else:
                 decisions += self._idle_results(now, look)
 
-        present = set(self.rule.present)
+        # Plates the scene has just declared gone: no new look for them in this tick.
+        confirmed = {d.plate for d in decisions if d.kind == "LEFT_CONFIRMED"}
+        present = set(self.rule.present) - confirmed
         mode = "departure" if present else "idle"
         if mode != self.mode:
             # A car arrived or the spot emptied: the other mode's schedule and looks no longer apply.
             self.mode = mode
             self.next_look_at = None
             self.agreement.reset()
+        if confirmed and not present:
+            return decisions  # the watcher applies the LEFT first; the idle looks start next tick
         if present:
             self.vehicle_since = self.vehicle_until = None  # a known car is here; the idle watch is off
             self.unreadable_raised = False

@@ -396,3 +396,49 @@ off first and the owner is told the stay length and the total. Lightning
 followed the new order first time in the replay scenarios, but in the first
 live-like run it told the owner and forgot the driver's bill once, which the
 finish check caught with one reminder.
+
+## 2026-10-12 — Cosmos Reason as the second pair of eyes: serving it on Nebius, third time
+
+**Start-up.** `nvidia/Cosmos-Reason2-8B` on one L40S (`gpu-l40s-a`,
+`1gpu-8vcpu-32gb`, on demand, token auth, no public IP), vLLM
+`v0.18.0-cu130` with `--max-model-len 16384` and no reasoning parser this
+time. Create accepted in 7 s; PROVISIONING 63 s; STARTING 31 s; IMAGE_PULLING
+168 s; STARTING again 11 s; RUNNING until `/v1/models` answered 200: 348 s.
+Total 628 s (10.5 min), the same as the second attempt in Week 1. Delete took
+101 s. The endpoint existed for 20.5 minutes: about $0.54 at $1.59 an hour.
+The endpoint API has no time limit or automatic stop (nothing in
+`nebius ai endpoint create --help`), so a local watchdog that runs
+`cosmos_down.py` after 3 hours was the automatic stop.
+
+**Structured output.** Asking for `response_format: {type: json_schema, ...,
+strict: true}` on vLLM worked first time: 30 of 30 evaluation looks and all
+27 looks in the three clip runs came back as the exact JSON object asked for,
+none unavailable, with `--reasoning-parser` gone the answer is in `content`.
+What the schema cannot enforce is a word count: `maxLength` is characters,
+and the model wrote 12 to 15 words for `what` about half the time; code cuts
+it to twelve.
+
+**Latency.** One 1280 px frame per request: 1.6 to 2.3 s per look, 1.8 s in
+the middle, 3.9 s for the very first request after loading (a warm-up). That
+is fast enough for a look every 15 s and for two looks within about 4 s when a
+plate goes unread.
+
+**Accuracy on the real camera frames.** vehicle_in_driveway 30 of 30 right
+(13 car frames, 4 empty frames, 13 car frames with the plate hidden under a
+grey rectangle), including the two empty frames with a white car parked on
+the street behind, which the question tells it to ignore. plate_visible 29 of
+30: one covered copy was called visible. The snapshot store only had 4 empty
+frames, because snapshots are taken at events.
+
+**End to end.** With SPOTTER_SCENE=cosmos on clips built from the stills: a
+departure confirmed 11.8 s after the last read instead of 30 s; a stay held
+open through 45 s of a covered plate and released when the plate was read
+again; an unreadable vehicle raised after 36 s of vehicle reports and cleared
+with "stayed for 34 seconds". One artefact of the still-based clip: the same
+frame repeated for 2 s was misread as a different plate five times in a row
+and produced a spurious ARRIVED for an "other" car, which the scene then
+confirmed gone with the real one; real video does not repeat a frame.
+
+**Confusing.** The CLI asked for a browser login once at the start of the
+round (the session token had expired) and then worked; a script running
+unattended would have hung on that.
