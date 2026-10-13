@@ -1,6 +1,11 @@
 """Measure Cosmos Reason on real camera frames: is a vehicle in the driveway, is its plate visible?
 
     .venv/bin/python scripts/scene_eval.py --car FILE... --empty FILE... [--covered-dir data/eval] [--expect PLATE]
+    .venv/bin/python scripts/scene_eval.py --eval-frames [data/eval_frames]
+
+With --eval-frames the frames a live run saved once a minute are used, named
+..._plate.jpg or ..._noplate.jpg by the plate reader's view at the time, and
+the report says how often the scene agreed with the plate reader.
 
 Each file is a camera frame you have labelled by eye: --car frames show the car
 parked in the spot, --empty frames show the empty driveway (a car on the street
@@ -49,7 +54,15 @@ def main() -> int:
     parser.add_argument("--covered-dir", default="data/eval")
     parser.add_argument("--expect", metavar="PLATE", help="your plate text, to find and cover it")
     parser.add_argument("--results", default="data/eval/results.json")
+    parser.add_argument("--eval-frames", nargs="?", const="data/eval_frames", metavar="DIR",
+                        help="use the frames a live run saved once a minute (plate / noplate by name)")
     args = parser.parse_args()
+    if args.eval_frames:
+        frames = sorted(Path(args.eval_frames).glob("*.jpg"))
+        args.car = [str(p) for p in frames if p.stem.endswith("_plate")]
+        args.empty = [str(p) for p in frames if p.stem.endswith("_noplate")]
+        args.expect = None  # no covered copies: the question is only whether the scene agrees with the reader
+        print(f"{len(frames)} eval frames: {len(args.car)} with a plate present, {len(args.empty)} without")
     settings = config.load({})
     url, token = os.environ.get("COSMOS_URL", "").strip(), os.environ.get("COSMOS_TOKEN", "").strip()
     if not url or not token:
@@ -102,6 +115,9 @@ def main() -> int:
     answered = [r for r in results if not r.get("unavailable")]
     latencies = sorted(r["latency_s"] for r in results)
     print("--- results ---")
+    if args.eval_frames:
+        agreed = [r for r in answered if r["vehicle"] == r["want_vehicle"]]
+        print(f"scene agreed with the plate reader on {len(agreed)} of {len(answered)} frames ({100 * len(agreed) / max(1, len(answered)):.1f}%)")
     for question, key, want in (("vehicle_in_driveway", "vehicle", "want_vehicle"), ("plate_visible", "plate", "want_plate")):
         right = [r for r in answered if r[key] == r[want]]
         wrong = [r for r in answered if r[key] != r[want]]

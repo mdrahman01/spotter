@@ -19,6 +19,12 @@ def clock_words(moment: datetime, now: datetime | None = None) -> str:
     return f"{local.strftime('%a %b')} {local.day}, {time_text}"
 
 
+def date_words(moment: datetime) -> str:
+    """"Mon Oct 13, 2026", in local time."""
+    local = moment.astimezone()
+    return f"{local.strftime('%a %b')} {local.day}, {local.year}"
+
+
 def _unit(count: int, name: str) -> str:
     return f"{count} {name}" + ("" if count == 1 else "s")
 

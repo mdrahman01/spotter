@@ -63,6 +63,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 EVENTS_PATH = DATA_DIR / "events.jsonl"
 SNAPSHOT_DIR = DATA_DIR / "snapshots"
+EVAL_DIR = DATA_DIR / "eval_frames"  # one full frame a minute from a live run, for a bigger scene test
+EVAL_EVERY_S = 60.0
+EVAL_KEEP = 300
 
 # Allowance for floating-point error when comparing a frame's time with the
 # next sample time.
@@ -98,6 +101,8 @@ class Summary:
     outages: int = 0
     downtime: float = 0.0
     stopped_by_user: bool = False
+    merged_reads: int = 0  # reads of a misread present plate counted as that plate
+    eval_frames: int = 0  # frames saved under data/eval_frames (live only)
     looks: int = 0  # scene looks made
     looks_unavailable: int = 0
     look_latencies: list[float] = field(default_factory=list)
@@ -127,6 +132,16 @@ class StopRequest:
             signal.signal(signal.SIGINT, signal.default_int_handler)
         except ValueError:
             pass
+
+
+def save_eval_frame(frame: np.ndarray, real_at: datetime, plate_present: bool, directory: Path = EVAL_DIR, keep: int = EVAL_KEEP) -> str:
+    """Save a full frame named with the time and whether a plate was present, keeping the newest `keep`."""
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{real_at.astimezone().strftime('%Y%m%d-%H%M%S')}_{'plate' if plate_present else 'noplate'}.jpg"
+    cv2.imwrite(str(directory / name), frame)
+    for old in sorted(directory.glob("*.jpg"))[:-keep]:
+        old.unlink()
+    return str(directory / name)
 
 
 def save_snapshot(frame: np.ndarray, name: str) -> str:
@@ -234,6 +249,7 @@ def run(
     last_read: dict[str, tuple[float, datetime, np.ndarray]] = {}
     first_read: dict[str, datetime] = {}
     stop = StopRequest()
+    eval_saved_at = [None]  # real time of the last frame saved for the scene test (live only)
 
     def label(t: float, real_at: datetime) -> str:
         return clock_words(real_at) if live else f"{t:.2f}s"
@@ -292,13 +308,17 @@ def run(
     def process(frame: np.ndarray, now: float, real_at: datetime) -> None:
         """One checked frame: read plates, update the rule and the timers, dispatch events."""
         summary.sampled += 1
+        if live and (eval_saved_at[0] is None or (real_at - eval_saved_at[0]).total_seconds() >= EVAL_EVERY_S):
+            eval_saved_at[0] = real_at
+            save_eval_frame(frame, real_at, bool(rule.present))
+            summary.eval_frames += 1
         reads = plate_reader.read(frame)
         if drop_reads(now):
             reads = []  # test only: the plate is "covered"
-        mine = sum(read.text == masker.expected for read in reads)
+        plates = rule.resolve({read.text for read in reads}, count=False)  # a misread of a present plate is that plate
+        mine = sum((rule.same_car(read.text) or read.text) == masker.expected for read in reads)
         summary.reads_mine += mine
         summary.reads_other += len(reads) - mine
-        plates = {read.text for read in reads}
         for plate in plates:
             if plate in rule.present and plate in last_read:
                 gap = now - last_read[plate][0]
@@ -379,6 +399,7 @@ def run(
     summary.elapsed = time.perf_counter() - started
     summary.stopped_by_user = summary.stopped_by_user or stop.requested
     summary.still_present = [masker.label(plate) for plate in sorted(rule.present)]
+    summary.merged_reads = rule.merged
     return summary
 
 
@@ -476,6 +497,7 @@ def print_summary(summary: Summary, masker: Masker) -> None:
             f" in {summary.elapsed:.0f}s; watched time {summary.watched:.1f}s"
         )
         print(f"camera outages: {summary.outages}, down {duration_words(summary.downtime)} in all")
+        print(f"frames saved for the scene test under data/eval_frames: {summary.eval_frames} (newest {EVAL_KEEP} kept)")
     else:
         print(
             f"sampled frames: {summary.sampled} of {summary.received} "
@@ -486,6 +508,7 @@ def print_summary(summary: Summary, masker: Masker) -> None:
     else:
         print(f"reads of my plate: {summary.reads_mine}")
         print(f"reads of other text: {summary.reads_other}")
+    print(f"reads merged into the plate they were misread from: {summary.merged_reads}")
     counts = ", ".join(f"{count} {kind}" for kind, count in summary.events.items())
     print(f"events: {summary.events.total()}" + (f" ({counts})" if counts else ""))
     gap = "none (no plate was read twice while present)" if summary.longest_gap is None else f"{summary.longest_gap:.1f}s"

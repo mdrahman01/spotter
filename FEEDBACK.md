@@ -442,3 +442,56 @@ confirmed gone with the real one; real video does not repeat a frame.
 **Confusing.** The CLI asked for a browser login once at the start of the
 round (the session token had expired) and then worked; a script running
 unattended would have hung on that.
+
+## 2026-10-13 — Tonight's price: Nemotron Ultra reasoning over live search results
+
+**What it had to do.** Three searches at most through Tavily (basic depth, six
+results each), then one decision by tool call (set_demand busy or peak with a
+link from this check's results, or keep_base) and one message to the owner
+with the price as code worded it. Fifteen real checks were run while the
+tool rules were being tightened, and one more over Telegram.
+
+**The decision was right every time.** Nothing was on near the lot on a
+Monday or Tuesday night in October, and all fifteen checks ended with the
+base price: thirteen by the model's own keep_base, two by code after the
+model never decided. Its reasons were sound and specific (a flu clinic at the
+library, a concert at a theatre it judged outside the radius, a stadium
+concert it noticed was eleven days ago). It never tried a link that was not
+in the results, never asked for a fourth search except once when the tool
+refused it, and never named a dollar amount on its own.
+
+**Where it drifted: the shape of the turn, not the judgment.** With 4,000 to
+6,000 tokens of search results in the context the model slid into chat
+habits: in five of the fifteen checks it answered with a markdown report
+("here's what I found", a table, "would you like me to search more?")
+instead of calling a tool, once it insisted it had no set_demand or
+keep_base tools although both were in the request, and after a decision it
+sent the owner's message with made-up arguments (level, price, until) or
+without any price, or three times in a row. The finish check and its
+reminder caught all of it, and code completed the two checks that had no
+decision.
+
+**What fixed it, in code rather than in the guide.** send_alert takes one
+argument, the message; code refuses a message before a decision, a message
+without the price the decision returned (or without the link for busy and
+peak), and a second message once one has been delivered; the already-decided
+error says what to do next. Results were cut to 400 characters each. After
+those changes four of the last six checks were clean and the other two
+finished after one reminder; none needed code. The price guide itself was
+not touched.
+
+**Latency and tokens.** 1.0 to 3.4 s per call, 1.3 to 2.0 s on average, 5 to
+13 calls per check depending on how often it needed reminding, with 38 to 436
+reasoning tokens per call; a whole check takes 8 to 25 s.
+
+**Tavily.** 31 basic searches across the fifteen checks, one credit each.
+The usage endpoint reported 0 after the first eight searches and answered
+429 after the next sixteen, so credits are reported from the search count.
+Results carry a published_date only sometimes; titles and content were
+enough for the model to judge the date.
+
+**Privacy slip to own up to.** The lot area is masked in output, but the
+first three checks were run before the mask covered the words of the area as
+the model and the results rephrase them, so the town's name appeared in that
+output. The mask now hides every word of the area of four letters or more,
+including inside URL slugs, and the state's two-letter code.

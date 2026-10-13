@@ -23,7 +23,8 @@ and model replies included, says MINE or OTHER instead of plate text.
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 
@@ -35,6 +36,7 @@ from spotter.dispute import DisputeAgent, GoodwillRule
 from spotter.events import Event
 from spotter.inbox import TelegramInbox
 from spotter.light import LightError, make_light
+from spotter.price import make_price_agent
 from spotter.timers import StayTimer
 from spotter.words import clock_words, duration_words
 
@@ -113,7 +115,10 @@ def main() -> int:
         def answer_message(text: str, received_at: datetime) -> None:
             own_db = Database()
             try:
-                DisputeAgent(client, own_db, alerts, masker, rule, settings.overstay_grace_s).handle(text, received_at)
+                if text.strip().lower() == "/price":
+                    make_price_agent(client, own_db, alerts, masker, settings).handle(received_at)
+                else:
+                    DisputeAgent(client, own_db, alerts, masker, rule, settings.overstay_grace_s).handle(text, received_at)
             finally:
                 own_db.close()
 
@@ -127,6 +132,31 @@ def main() -> int:
             "inbox: text messages from your Telegram chat are answered as the driver of the last closed stay"
             f" | goodwill rule: waiving {'on' if settings.waive_fees else 'off'}, within {settings.waive_within_min:g} minutes"
         )
+
+    price_thread = None
+    if settings.price_check_at:
+        import threading
+
+        def daily_price_check() -> None:
+            """One price check a day at the local time SPOTTER_PRICE_CHECK_AT, on its own thread."""
+            hour, minute = (int(v) for v in settings.price_check_at.split(":"))
+            while True:
+                local = datetime.now().astimezone()
+                due = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if due <= local:
+                    due += timedelta(days=1)
+                time.sleep(max(1.0, (due - local).total_seconds()))
+                own_db = Database()
+                try:
+                    make_price_agent(client, own_db, alerts, masker, settings).handle()
+                except Exception as err:  # the watcher must not stop for a failed price check
+                    print(f"price check failed: {type(err).__name__}: {err}", flush=True)
+                finally:
+                    own_db.close()
+
+        price_thread = threading.Thread(target=daily_price_check, name="price-check", daemon=True)
+        price_thread.start()
+        print(f"price check: once a day at {settings.price_check_at} local time, on its own thread")
 
     def timers(now: float, real_time: datetime, plates: set[str]) -> list[Event]:
         return [Event(t.type, t.plate, now, now, now, 0) for t in timer.check(real_time, plates)]

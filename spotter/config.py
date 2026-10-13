@@ -7,6 +7,8 @@ The zone is written x0,y0,x1,y1, e.g. SPOTTER_ZONE=0.35,0.27,0.69,0.69.
 
 import argparse
 import os
+import re
+from decimal import Decimal, InvalidOperation
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 
@@ -104,6 +106,12 @@ class Settings:
     scene_timeout_s: float = field(
         default=15, metadata={"help": "a look slower than this counts as scene unavailable"}
     )
+    rate_base: int = field(default=500, metadata={"help": "the owner's base hourly price, in dollars (e.g. 5.00)"})
+    rate_busy: int = field(default=800, metadata={"help": "the hourly price on a busy night, in dollars"})
+    rate_peak: int = field(default=1200, metadata={"help": "the hourly price on a peak night, in dollars"})
+    lot_area: str = field(default="", metadata={"help": "where the lot is, for the event search (never printed)"})
+    event_radius_miles: float = field(default=5, metadata={"help": "events within this many miles count"})
+    price_check_at: str = field(default="", metadata={"help": "local time HH:MM of the daily price check (empty: none)"})
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -137,6 +145,12 @@ class Settings:
         if min(self.scene_check_after_s, self.scene_relook_every_s, self.scene_idle_every_s,
                self.scene_unreadable_after_s, self.scene_timeout_s) <= 0:
             raise ValueError("the scene_* seconds must be above 0")
+        if min(self.rate_base, self.rate_busy, self.rate_peak) < 0:
+            raise ValueError("the rates must not be negative")
+        if self.event_radius_miles <= 0:
+            raise ValueError("event_radius_miles must be above 0")
+        if self.price_check_at and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", self.price_check_at):
+            raise ValueError(f"price_check_at must be HH:MM, got {self.price_check_at!r}")
 
 
 def parse_zone(text: str) -> Zone:
@@ -145,6 +159,14 @@ def parse_zone(text: str) -> Zone:
         raise ValueError(f"zone needs four numbers x0,y0,x1,y1, got {text!r}")
     x0, y0, x1, y1 = (float(part) for part in parts)
     return x0, y0, x1, y1
+
+
+def parse_dollars(text: str) -> int:
+    """An amount in dollars ("5.00") as whole cents."""
+    try:
+        return int((Decimal(text.strip().lstrip("$")) * 100).to_integral_value())
+    except InvalidOperation:
+        raise ValueError(f"not an amount in dollars: {text!r}") from None
 
 
 def parse_bool(text: str) -> bool:
@@ -181,6 +203,12 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "scene_idle_every_s": float,
     "scene_unreadable_after_s": float,
     "scene_timeout_s": float,
+    "rate_base": parse_dollars,
+    "rate_busy": parse_dollars,
+    "rate_peak": parse_dollars,
+    "lot_area": str,
+    "event_radius_miles": float,
+    "price_check_at": str,
 }
 
 

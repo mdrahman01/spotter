@@ -37,6 +37,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_session_per_plate
     ON sessions (plate) WHERE status = 'open';
+CREATE TABLE IF NOT EXISTS prices (
+    id INTEGER PRIMARY KEY,
+    set_at TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    level TEXT NOT NULL CHECK (level IN ('base', 'busy', 'peak')),
+    rate_cents_per_hour INTEGER NOT NULL CHECK (rate_cents_per_hour >= 0),
+    event TEXT,
+    reason TEXT,
+    source_url TEXT
+);
 CREATE TABLE IF NOT EXISTS action_log (
     id INTEGER PRIMARY KEY,
     time TEXT NOT NULL,
@@ -84,7 +94,7 @@ class Database:
     def reset(self) -> None:
         """Empty every table."""
         with self.conn:
-            for table in ("action_log", "sessions", "bookings"):
+            for table in ("action_log", "sessions", "bookings", "prices"):
                 self.conn.execute(f"DELETE FROM {table}")
 
     def _one(self, sql: str, *params) -> dict | None:
@@ -201,6 +211,25 @@ class Database:
             self.conn.execute(
                 "UPDATE sessions SET amount_cents = ? WHERE id = ?", (amount_cents, session_id)
             )
+
+    # tonight's price
+
+    def set_price(self, level: str, rate_cents: int, set_at: datetime, valid_until: datetime,
+                  event: str | None = None, reason: str | None = None, source_url: str | None = None) -> int:
+        """Record tonight's price: the level the pricing agent chose and the price the owner's table gives it."""
+        with self.conn:
+            cursor = self.conn.execute(
+                "INSERT INTO prices (set_at, valid_until, level, rate_cents_per_hour, event, reason, source_url)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (iso(set_at), iso(valid_until), level, rate_cents, event, reason, source_url),
+            )
+        return cursor.lastrowid
+
+    def tonight_price(self, moment: datetime) -> dict | None:
+        """The price in force at `moment`: the latest record whose valid_until is still ahead."""
+        return self._one(
+            "SELECT * FROM prices WHERE set_at <= ? AND valid_until > ? ORDER BY id DESC LIMIT 1", iso(moment), iso(moment)
+        )
 
     # action log
 

@@ -93,6 +93,26 @@ class CameraMonitorTest(unittest.TestCase):
         self.assertEqual(monitor.outages, 1)
 
 
+class EvalFramesTest(unittest.TestCase):
+    def test_frames_are_named_by_time_and_plate_presence_and_the_newest_300_are_kept(self):
+        import tempfile
+        from datetime import datetime, timedelta, timezone
+
+        from spotter.watch import save_eval_frame
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "eval_frames"
+            frame = np.full((48, 64, 3), 120, dtype=np.uint8)
+            t0 = datetime(2026, 10, 13, 19, 5, 0, tzinfo=timezone.utc)
+            for minute in range(5):
+                save_eval_frame(frame, t0 + timedelta(minutes=minute), minute % 2 == 0, directory, keep=3)
+            names = sorted(p.name for p in directory.glob("*.jpg"))
+            self.assertEqual(len(names), 3)  # only the newest three kept
+            self.assertTrue(all(n.endswith(("_plate.jpg", "_noplate.jpg")) for n in names))
+            self.assertRegex(names[-1], r"^\d{8}-\d{6}_plate\.jpg$")  # minute 4: a plate was present
+            self.assertTrue(names[-2].endswith("_noplate.jpg"))
+
+
 class MaskSourceTest(unittest.TestCase):
     def test_credentials_are_hidden(self):
         self.assertEqual(mask_source("rtsp://admin:s3cret@192.168.1.50:554/stream1"), "rtsp://***@192.168.1.50:554/stream1")

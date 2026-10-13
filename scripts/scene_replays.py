@@ -116,8 +116,11 @@ def run(name: str, plate: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Replays with scripted scene reports.")
     parser.add_argument("--expect", required=True, metavar="PLATE")
-    parser.add_argument("names", nargs="*", default=list(REPLAYS), choices=list(REPLAYS))
+    parser.add_argument("names", nargs="*", help=f"which replays (default all): {', '.join(REPLAYS)}")
     args = parser.parse_args()
+    unknown = [n for n in args.names if n not in REPLAYS]
+    if unknown:
+        parser.error(f"unknown replay {', '.join(unknown)}; choose from {', '.join(REPLAYS)}")
     results = [run(name, args.expect) for name in (args.names or list(REPLAYS))]
     print(f"\n{sum(results)}/{len(results)} scene replays passed")
     return 0 if all(results) else 1

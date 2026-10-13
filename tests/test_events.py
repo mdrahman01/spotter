@@ -97,6 +97,64 @@ class LeavingTest(unittest.TestCase):
         self.assertEqual((left.first_seen, left.last_seen, left.reads), (0.0, 2.0, 11))
         self.assertEqual(rule.present, {})
 
+class OneCarOnePlateTest(unittest.TestCase):
+    """While a plate is present, a read within two edits of it is the same car misread."""
+
+    def arrived(self, rule, plate="MAYR473", at=0.0):
+        events = []
+        for i in range(5):
+            events += rule.update(at + i * 0.5, {plate})
+        self.assertEqual([e.type for e in events], ["ARRIVED"])
+        return events[0]
+
+    def test_a_misread_counts_as_a_sighting_of_the_present_plate(self):
+        from spotter.events import edit_distance
+        self.assertEqual(edit_distance("MAYR473", "MAYR478"), 1)
+        self.assertEqual(edit_distance("MAYR473", "MAYP47"), 2)  # one substitution, one deletion
+        self.assertEqual(edit_distance("MAYR473", "ABC123"), 3)  # capped: more than two
+        rule = ArriveLeaveRule(arrive_reads=5, arrive_window_s=3, leave_after_s=4)
+        self.arrived(rule)
+        for i in range(6):  # six frames of a misread: would have been a second arrival
+            events = rule.update(3 + i * 0.5, {"MAYR478"})
+            self.assertEqual(events, [])
+        self.assertEqual(set(rule.present), {"MAYR473"})
+        self.assertEqual(rule.present["MAYR473"].last_seen, 5.5)
+        self.assertEqual(rule.merged, 6)
+        self.assertEqual(rule.resolve({"MAYR478", "MAYR4T3", "ABC123"}, count=False), {"MAYR473", "ABC123"})
+        gone = rule.update(20, set())  # unread since 5.5: the next update declares it gone, last seen at the misread
+        self.assertEqual([(e.type, e.last_seen) for e in gone], [("LEFT", 5.5)])
+        self.assertEqual(rule.present, {})
+
+    def test_a_different_plate_still_arrives(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)
+        events = []
+        for i in range(5):
+            events += rule.update(3 + i * 0.5, {"MAYR473", "ABC123"})
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "ABC123")])
+        self.assertEqual(rule.merged, 0)
+
+    def test_at_arrival_the_text_read_most_often_wins(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        events = []
+        # the reader wavers: six reads of the right text, five of a one-character misread
+        reads = ["MAYR473", "MAYR478", "MAYR473", "MAYR478", "MAYR473", "MAYR478", "MAYR473", "MAYR478", "MAYR473", "MAYR478", "MAYR473"]
+        for i, text in enumerate(reads):
+            events += rule.update(i * 0.25, {text})
+            if events:
+                break
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "MAYR473")])
+        self.assertEqual(events[0].reads, 9)  # the pooled reads in the window
+        self.assertEqual(events[0].first_seen, 0.0)
+        self.assertEqual(rule.merged, 4)
+        self.assertEqual(rule._recent, {})
+        # the misread wins when it was read more often
+        rule = ArriveLeaveRule(5, 3, 4)
+        events = []
+        for i, text in enumerate(["MAYR478"] * 6 + ["MAYR473"] * 5):
+            events += rule.update(i * 0.25, {text})
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "MAYR478")])
+
 
 if __name__ == "__main__":
     unittest.main()

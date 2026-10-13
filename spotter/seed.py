@@ -13,9 +13,14 @@ import argparse
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from spotter.db import Database, iso, now
 from spotter.reader import normalize
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def dollars_to_cents(text: str) -> int:
@@ -34,6 +39,18 @@ def parse_time(text: str) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+def tonight_rate(db: Database, given: int | None, at: datetime) -> tuple[int, str]:
+    """The rate for a booking: the one given, else tonight's price if the pricing agent set one, else the base price."""
+    if given is not None:
+        return given, "given"
+    tonight = db.tonight_price(at)
+    if tonight:
+        return tonight["rate_cents_per_hour"], f"tonight's price, {tonight['level']}"
+    from spotter import config
+
+    return config.load({}).rate_base, "base price"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="python -m spotter.seed",
@@ -43,8 +60,8 @@ def main() -> int:
     parser.add_argument("--driver", help="the driver's name")
     parser.add_argument("--hours", type=float, default=12, help="booking length (default 12)")
     parser.add_argument(
-        "--rate", type=dollars_to_cents, default="5.00", metavar="DOLLARS",
-        help="dollars per hour (default 5.00)",
+        "--rate", type=dollars_to_cents, default=None, metavar="DOLLARS",
+        help="dollars per hour (default: tonight's price if the pricing agent set one, else SPOTTER_RATE_BASE)",
     )
     parser.add_argument(
         "--starts-at", type=parse_time, metavar="ISO_TIME", help="booking start (default: now)"
@@ -54,6 +71,7 @@ def main() -> int:
     )
     parser.add_argument("--reset", action="store_true", help="empty the database first")
     args = parser.parse_args()
+    load_dotenv(REPO_ROOT / ".env")
     if not args.reset and not args.plate:
         parser.error("nothing to do: pass --plate ... or --reset")
     if args.plate and not args.driver:
@@ -73,10 +91,11 @@ def main() -> int:
         ends_at = args.ends_at or starts_at + timedelta(hours=args.hours)
         if ends_at <= starts_at:
             parser.error("--ends-at must be after the start")
-        booking_id = db.add_booking(plate, args.driver, starts_at, ends_at, args.rate)
+        rate, source = tonight_rate(db, args.rate, starts_at)
+        booking_id = db.add_booking(plate, args.driver, starts_at, ends_at, rate)
         print(
             f"booking #{booking_id} added for the plate given on the command line:"
-            f" {args.driver}, from {iso(starts_at)} to {iso(ends_at)}, {args.rate} cents/hour"
+            f" {args.driver}, from {iso(starts_at)} to {iso(ends_at)}, {rate} cents/hour ({source})"
         )
     return 0
 

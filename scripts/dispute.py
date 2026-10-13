@@ -30,6 +30,7 @@ from spotter.attendant import BASE_URL  # noqa: E402
 from spotter.db import Database  # noqa: E402
 from spotter.dispute import DISPUTE_MODEL, DisputeAgent, GoodwillRule  # noqa: E402
 from spotter.inbox import TelegramInbox  # noqa: E402
+from spotter.price import make_price_agent  # noqa: E402
 from spotter.privacy import Masker  # noqa: E402
 from spotter.reader import normalize  # noqa: E402
 from spotter.words import clock_words  # noqa: E402
@@ -93,18 +94,22 @@ def main() -> int:
         print(f"INBOX: text received at {clock_words(got)} (sent {clock_words(received_at)}): {text!r}", flush=True)
         own_db = Database()
         try:
-            agent = DisputeAgent(client, own_db, alerts, masker, rule, settings.overstay_grace_s, model=args.model)
-            how = agent.handle(text, received_at)
+            if text.strip().lower() == "/price":
+                agent = make_price_agent(client, own_db, alerts, masker, settings)
+                how = agent.handle(received_at)
+            else:
+                agent = DisputeAgent(client, own_db, alerts, masker, rule, settings.overstay_grace_s, model=args.model)
+                how = agent.handle(text, received_at)
             reply_at = next(
                 (datetime.fromisoformat(a["time"]) for a in own_db.actions()
-                 if a["tool"] == "send_alert" and '"to": "driver"' in a["arguments"].replace('"to":"driver"', '"to": "driver"')
-                 and datetime.fromisoformat(a["time"]) >= got.replace(microsecond=0)),
+                 if a["tool"] == "send_alert" and datetime.fromisoformat(a["time"]) >= got.replace(microsecond=0)),
                 None,
             )
         finally:
             own_db.close()
         reply = f"{(reply_at - got).total_seconds():.0f}s" if reply_at else "not delivered"
-        print(f"INBOX: handled ({how}) in {time.perf_counter() - started:.1f}s; the driver's reply went out {reply} after receipt", flush=True)
+        who = "owner's" if text.strip().lower() == "/price" else "driver's"
+        print(f"INBOX: handled ({how}) in {time.perf_counter() - started:.1f}s; the {who} reply went out {reply} after receipt", flush=True)
         agent.print_stats()
 
     inbox = TelegramInbox.from_env(answer, masker.print)
