@@ -448,12 +448,12 @@ unattended would have hung on that.
 **What it had to do.** Three searches at most through Tavily (basic depth, six
 results each), then one decision by tool call (set_demand busy or peak with a
 link from this check's results, or keep_base) and one message to the owner
-with the price as code worded it. Fifteen real checks were run while the
-tool rules were being tightened, and one more over Telegram.
+with the price as code worded it. Ten real checks were run: nine from the command line while the tool rules
+were being tightened, and one from a "/price" text over Telegram.
 
 **The decision was right every time.** Nothing was on near the lot on a
-Monday or Tuesday night in October, and all fifteen checks ended with the
-base price: thirteen by the model's own keep_base, two by code after the
+Monday or Tuesday night in October, and all ten checks ended with the
+base price: eight by the model's own keep_base, two by code after the
 model never decided. Its reasons were sound and specific (a flu clinic at the
 library, a concert at a theatre it judged outside the radius, a stadium
 concert it noticed was eleven days ago). It never tried a link that was not
@@ -462,7 +462,7 @@ refused it, and never named a dollar amount on its own.
 
 **Where it drifted: the shape of the turn, not the judgment.** With 4,000 to
 6,000 tokens of search results in the context the model slid into chat
-habits: in five of the fifteen checks it answered with a markdown report
+habits: in five of the ten checks it answered with a markdown report
 ("here's what I found", a table, "would you like me to search more?")
 instead of calling a tool, once it insisted it had no set_demand or
 keep_base tools although both were in the request, and after a decision it
@@ -476,17 +476,18 @@ argument, the message; code refuses a message before a decision, a message
 without the price the decision returned (or without the link for busy and
 peak), and a second message once one has been delivered; the already-decided
 error says what to do next. Results were cut to 400 characters each. After
-those changes four of the last six checks were clean and the other two
+those changes two of the last four checks were clean and the other two
 finished after one reminder; none needed code. The price guide itself was
 not touched.
 
-**Latency and tokens.** 1.0 to 3.4 s per call, 1.3 to 2.0 s on average, 5 to
-13 calls per check depending on how often it needed reminding, with 38 to 436
-reasoning tokens per call; a whole check takes 8 to 25 s.
+**Latency and tokens.** 1.0 to 4.2 s per call, 1.3 to 2.0 s on average, 5 to
+13 calls per check depending on how often it needed reminding, with 22 to 436
+reasoning tokens per call; a whole check takes 8 to 25 s, and the Telegram
+one answered the owner 13 s after the text arrived.
 
-**Tavily.** 31 basic searches across the fifteen checks, one credit each.
-The usage endpoint reported 0 after the first eight searches and answered
-429 after the next sixteen, so credits are reported from the search count.
+**Tavily.** 26 basic searches across the ten checks, one credit each. The
+usage endpoint reported 0 throughout and answered 429 once in between, so
+credits are reported from the search count.
 Results carry a published_date only sometimes; titles and content were
 enough for the model to judge the date.
 
