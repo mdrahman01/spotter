@@ -27,8 +27,9 @@ from spotter.db import Database, iso, parse
 from spotter.events import Event, EventFrames
 from spotter.light import Light, LightError
 from spotter.privacy import Masker
+from spotter.scene import SPOT_CLEAR, UNREADABLE_VEHICLE
 from spotter.timers import time_left_words
-from spotter.words import WordBook
+from spotter.words import WordBook, clock_words
 from spotter.tools import (
     DEFAULT_MIN_CHARGE_CENTS,
     DEFAULT_OVERSTAY_FEE_CENTS,
@@ -47,7 +48,8 @@ ATTEMPTS = 2  # tries per model call before the attendant counts as offline
 
 SYSTEM_PROMPT = """\
 You are Spotter, the automated attendant for one private driveway.
-Each user message is one event (ARRIVED, ENDING_SOON, OVERSTAY or LEFT) for one licence plate, as JSON.
+Each user message is one event (ARRIVED, ENDING_SOON, OVERSTAY or LEFT) for one licence plate, as JSON,
+or a scene event about a vehicle whose plate could not be read (UNREADABLE_VEHICLE, SPOT_CLEAR).
 You act only through the tools. The code behind them enforces the rules and does
 all arithmetic; a tool that returns {"error": ...} did nothing. Clock times and
 durations come to you as words (like "6:02 pm" or "16 seconds"): use them exactly
@@ -61,7 +63,9 @@ Rules:
 5. OVERSTAY: set_light amber, send_alert to the driver that the booking has ended and an overstay fee of overstay_fee (in the event) now applies, and send_alert to the owner that the car is overstaying.
 6. LEFT with an open stay: set_light off first, before anything else. Then end_session, compute_bill, send_alert the bill to the driver, giving the breakdown (parking, overstay fee, total) when the bill has an overstay fee, and send_alert to the owner that the car has left, how long it stayed (stayed from end_session) and the total billed.
 7. LEFT with no open stay: set_light off first, then send_alert to the owner that the car has gone and how long it stayed (stayed_for in the event).
-8. When done, reply with one short sentence listing what you did, and make no more tool calls.
+8. UNREADABLE_VEHICLE (no plate; do not call lookup_booking): set_light red, then send_alert to the owner that a vehicle is in the spot whose plate cannot be read, giving the description in "what" and saying a photo is attached.
+9. SPOT_CLEAR (no plate; do not call lookup_booking): set_light off, then send_alert to the owner that the vehicle has gone and how long it stayed (stayed_for in the event).
+10. When done, reply with one short sentence listing what you did, and make no more tool calls.
 """
 
 CLEAN, AFTER_REMINDER, BY_CODE = "clean", "after a reminder", "completed by code"
@@ -159,6 +163,8 @@ class Attendant:
             last_read_at=frames.last_read_at if left else None,
             last_read_snapshot=frames.last_read_snapshot if left else None,
             started=time.perf_counter(),
+            photo_caption=photo_caption(event.type, at, frames.last_read_at if left else None),
+            what=event.what,
         )
         self._words = words = WordBook()
         toolbox = Toolbox(
@@ -169,11 +175,17 @@ class Attendant:
         self._logged_event = {"type": event.type, "plate": event.plate, "time": iso(at)}
         if left:
             self._logged_event["last_read_at"] = iso(frames.last_read_at)
+        if event.type == SPOT_CLEAR:
+            self._logged_event["stayed_for"] = expected.stayed_for
 
         # The model gets facts it acts on, as words it can repeat, not file paths or
         # raw timestamps: the code attaches snapshots and makes every time and duration.
         payload = {"event": event.type, "plate": event.plate, "time": words.clock(at, at), "reads": event.reads}
-        if left:
+        if event.type in (UNREADABLE_VEHICLE, SPOT_CLEAR):
+            payload = {"event": event.type, "plate": None, "time": words.clock(at, at), "what": event.what}
+            if event.type == SPOT_CLEAR:
+                payload["stayed_for"] = words.note(expected.stayed_for)
+        elif left:
             payload["last_read"] = words.clock(frames.last_read_at, at)  # the car left when it was last read
             if expected.stay is None:
                 payload["stayed_for"] = words.note(expected.stayed_for)
@@ -252,6 +264,8 @@ class Attendant:
             else:
                 seconds = event.last_seen - event.first_seen
             stayed_for = self._words.duration(seconds)
+        elif event.type == SPOT_CLEAR:
+            stayed_for = self._words.duration(event.last_seen - event.first_seen)
         return Expected(event.type, event.plate, booking, stay, time_left, stayed_for)
 
     # ------------------------------------------------------------ the model loop
@@ -450,6 +464,24 @@ class Attendant:
                     None,
                     lambda: f"The car has gone after {stayed}.",
                 )
+        elif expected.kind == UNREADABLE_VEHICLE:
+            want_light("red")
+            what = context.what or "a vehicle"
+            want_alert(
+                "owner",
+                "send the owner an alert that a vehicle is in the spot whose plate cannot be read, with the description and the photo",
+                None,
+                lambda: f"A vehicle is in the spot and its plate cannot be read: {what}. Photo attached.",
+            )
+        elif expected.kind == SPOT_CLEAR:
+            want_light("off")
+            stayed = expected.stayed_for or "a while"
+            want_alert(
+                "owner",
+                f"send the owner an alert that the vehicle has gone after {stayed}",
+                expected.stayed_for,
+                lambda: f"The vehicle with the unreadable plate has gone after {stayed}.",
+            )
         return items
 
     def _remind(self, messages: list[dict], kind: str, missing: list[Missing]) -> None:
@@ -501,7 +533,7 @@ class Attendant:
         if to == "driver":
             booking = self.db.latest_booking(context.plate)
             name = booking["driver"] if booking else None
-        delivery = self.alerts.send(Alert(to, name, text, context.attachment))
+        delivery = self.alerts.send(Alert(to, name, text, context.attachment, snapshot_caption=context.photo_caption))
         self.stats.undeliverable += not delivery.delivered
         self._alerts.append((to, text, delivery.delivered))
         self._record(
@@ -578,6 +610,20 @@ class Attendant:
                 f" | reasoning tokens: total {sum(s.reasoning_tokens)},"
                 f" max {max(s.reasoning_tokens)} in one call"
             )
+
+
+def photo_caption(kind: str, at: datetime, last_read_at: datetime | None = None) -> str:
+    """What the event's frame shows and when, made by code: "Arrived, 2:18 pm"."""
+    if kind == "LEFT":
+        return f"Last seen, {clock_words(last_read_at or at)}"
+    label = {
+        "ARRIVED": "Arrived",
+        "ENDING_SOON": "Seen",
+        "OVERSTAY": "Seen after the fee began",
+        UNREADABLE_VEHICLE: "Vehicle seen",
+        SPOT_CLEAR: "Spot clear",
+    }.get(kind, "Seen")
+    return f"{label}, {clock_words(at)}"
 
 
 def reasoning_tokens(usage: dict) -> int | None:

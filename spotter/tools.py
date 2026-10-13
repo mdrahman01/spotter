@@ -41,6 +41,8 @@ class EventContext:
     last_read_at: datetime | None = None  # real time the plate was last read, when that differs (LEFT)
     last_read_snapshot: str | None = None  # the frame of that last read
     started: float = 0.0  # time.perf_counter() when handling began, to time the light
+    photo_caption: str = ""  # made by code: what the attached frame shows and when
+    what: str = ""  # scene events: the vehicle as the scene described it
 
     @property
     def departed_at(self) -> datetime:
@@ -324,7 +326,7 @@ class Toolbox:
             if booking is None:
                 return {"error": "no booking for this plate, so there is no driver to alert"}
             name = booking["driver"]
-        delivery = self.alerts.send(Alert(to, name, message.strip(), self.event.attachment))
+        delivery = self.alerts.send(Alert(to, name, message.strip(), self.event.attachment, snapshot_caption=self.event.photo_caption))
         return {
             "sent_to": to,
             "name": name,

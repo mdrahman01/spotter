@@ -1,6 +1,6 @@
 """Check what the attendant did in one scenario and print PASS or FAIL.
 
-    .venv/bin/python scripts/check_attendant.py booked|unknown|overstay
+    .venv/bin/python scripts/check_attendant.py booked|unknown|overstay|unreadable
 
 Reads data/spotter.db. For every event it works out the end state the rules
 require, the same facts the attendant's finish check uses, from the sessions
@@ -19,6 +19,8 @@ Required end state:
                            bill stored, a driver alert containing the total, an owner alert
                            containing how long the car stayed and the total, light off.
   LEFT, no stay:           an owner alert, light off.
+  UNREADABLE_VEHICLE:      light red, an owner alert.
+  SPOT_CLEAR:              light off, an owner alert containing how long the vehicle stayed.
 For every LEFT the seconds from the last read to the light going off are
 reported, and a note is made when a message went out before the light changed
 (the rule is light first). Photos follow the messages from a background
@@ -29,7 +31,8 @@ clock time or a duration that code did not supply for that event (the "words"
 row of the event lists what code supplied). Shape: booked has one
 closed session billed at least the minimum charge; unknown has no session;
 overstay has ARRIVED, ENDING_SOON, OVERSTAY, LEFT in that order and a 600 cent
-bill with a 500 cent overstay fee.
+bill with a 500 cent overstay fee; unreadable has UNREADABLE_VEHICLE then
+SPOT_CLEAR, no ARRIVED or LEFT, and no session.
 """
 
 import json
@@ -47,7 +50,7 @@ from spotter.timers import time_left_words  # noqa: E402
 from spotter.tools import dollars  # noqa: E402
 from spotter.words import duration_words  # noqa: E402
 
-SCENARIOS = ("booked", "unknown", "overstay")
+SCENARIOS = ("booked", "unknown", "overstay", "unreadable")
 OVERSTAY_EVENTS = ["ARRIVED", "ENDING_SOON", "OVERSTAY", "LEFT"]
 CAMERA_EVENTS = ("CAMERA_OFFLINE", "CAMERA_BACK")
 
@@ -194,6 +197,16 @@ def main() -> int:
                 ("owner alert", has("owner")),
             ]
             expected_recipients = {"driver", "owner"}
+        elif kind == "UNREADABLE_VEHICLE":
+            required = [("light red", light == "red"), ("owner alert", has("owner"))]
+            expected_recipients = {"owner"}
+        elif kind == "SPOT_CLEAR":
+            stayed = event.get("stayed_for")
+            required = [
+                ("light off", light == "off"),
+                (f"owner alert with how long it stayed ({stayed})", stayed is not None and has("owner", stayed)),
+            ]
+            expected_recipients = {"owner"}
         elif kind == "LEFT":
             last_read = event.get("last_read_at")
             if stay and (stay["left_at"] is None or stay["left_at"] >= (last_read or event["time"])):
@@ -286,6 +299,11 @@ def main() -> int:
             failures.append(f"bill {sessions[0]['amount_cents']} is below the minimum charge {settings.min_charge_cents}")
     elif scenario == "unknown" and sessions:
         failures.append(f"{len(sessions)} sessions instead of none")
+    elif scenario == "unreadable":
+        if order != ["UNREADABLE_VEHICLE", "SPOT_CLEAR"]:
+            failures.append(f"events {order} are not ['UNREADABLE_VEHICLE', 'SPOT_CLEAR']")
+        if sessions:
+            failures.append(f"{len(sessions)} sessions instead of none")
 
     if failures:
         print("FAIL: " + "; ".join(failures))

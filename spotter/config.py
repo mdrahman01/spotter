@@ -81,6 +81,29 @@ class Settings:
         default=10,
         metadata={"help": "goodwill rule: the car's last read must be within this many minutes of the fee beginning"},
     )
+    scene: str = field(
+        default="off",
+        metadata={"help": "the second pair of eyes: off, cosmos (COSMOS_URL/COSMOS_TOKEN from .env) or script:<file>"},
+    )
+    spot_description: str = field(
+        default="",
+        metadata={"help": "the parking spot as Cosmos is told it, e.g. the paved driveway in the foreground"},
+    )
+    scene_check_after_s: float = field(
+        default=8, metadata={"help": "a present plate unread this long gets a look"}
+    )
+    scene_relook_every_s: float = field(
+        default=15, metadata={"help": "look again this often while the scene still sees the car"}
+    )
+    scene_idle_every_s: float = field(
+        default=15, metadata={"help": "look this often while no car is present"}
+    )
+    scene_unreadable_after_s: float = field(
+        default=20, metadata={"help": "a vehicle seen this long with no plate read is UNREADABLE_VEHICLE"}
+    )
+    scene_timeout_s: float = field(
+        default=15, metadata={"help": "a look slower than this counts as scene unavailable"}
+    )
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -109,6 +132,11 @@ class Settings:
             raise ValueError("light_brightness must be between 1 and 100")
         if self.waive_within_min < 0:
             raise ValueError("waive_within_min must not be negative")
+        if self.scene not in ("off", "cosmos") and not self.scene.startswith("script:"):
+            raise ValueError(f"scene must be off, cosmos or script:<file>, got {self.scene!r}")
+        if min(self.scene_check_after_s, self.scene_relook_every_s, self.scene_idle_every_s,
+               self.scene_unreadable_after_s, self.scene_timeout_s) <= 0:
+            raise ValueError("the scene_* seconds must be above 0")
 
 
 def parse_zone(text: str) -> Zone:
@@ -146,6 +174,13 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "light_brightness": int,
     "waive_fees": parse_bool,
     "waive_within_min": float,
+    "scene": str.lower,
+    "spot_description": str,
+    "scene_check_after_s": float,
+    "scene_relook_every_s": float,
+    "scene_idle_every_s": float,
+    "scene_unreadable_after_s": float,
+    "scene_timeout_s": float,
 }
 
 

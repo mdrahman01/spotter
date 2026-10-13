@@ -17,12 +17,14 @@ EPSILON = 1e-6
 
 @dataclass(frozen=True)
 class Event:
-    type: str  # "ARRIVED" or "LEFT"
-    plate: str
+    type: str  # "ARRIVED", "LEFT", a timer event, or a scene event (UNREADABLE_VEHICLE, SPOT_CLEAR)
+    plate: str  # "" for a scene event about a vehicle with no readable plate
     time: float  # when the rule fired
     first_seen: float  # first read of this stay
     last_seen: float  # latest read of this stay
     reads: int  # reads of the plate during this stay
+    note: str = ""  # e.g. "confirmed by scene"
+    what: str = ""  # scene events: the vehicle as the scene described it
 
 
 @dataclass(frozen=True)
@@ -54,8 +56,26 @@ class ArriveLeaveRule:
         self.arrive_window_s = arrive_window_s
         self.leave_after_s = leave_after_s
         self.present: dict[str, Stay] = {}
+        # Plates whose departure is held off because the scene still sees the car.
+        self.held: set[str] = set()
         # Read times of plates that have not arrived, newest last.
         self._recent: dict[str, deque[float]] = {}
+
+    def hold(self, plate: str) -> None:
+        """Keep the plate's stay open past leave_after_s until release() or another plate arrives."""
+        if plate in self.present:
+            self.held.add(plate)
+
+    def release(self, plate: str) -> None:
+        self.held.discard(plate)
+
+    def leave_now(self, plate: str, now: float, note: str = "") -> Event | None:
+        """Declare the plate gone now, as the scene confirmed; its last read stays the departure time."""
+        stay = self.present.pop(plate, None)
+        self.held.discard(plate)
+        if stay is None:
+            return None
+        return _event("LEFT", plate, now, stay, note)
 
     def update(self, now: float, plates: Iterable[str]) -> list[Event]:
         """Feed the plates read in one sampled frame at time `now`; return the events.
@@ -76,12 +96,19 @@ class ArriveLeaveRule:
                 times.popleft()
             if len(times) >= self.arrive_reads:
                 del self._recent[plate]
+                # A new arrival means a held car has gone: it leaves first.
+                for held in sorted(self.held):
+                    gone = self.leave_now(held, now, "another plate arrived")
+                    if gone:
+                        events.append(gone)
                 stay = Stay(first_seen=times[0], last_seen=now, reads=len(times))
                 self.present[plate] = stay
                 events.append(_event("ARRIVED", plate, now, stay))
 
         for plate in sorted(self.present):
             stay = self.present[plate]
+            if plate in self.held:
+                continue
             if now - stay.last_seen >= self.leave_after_s - EPSILON:
                 del self.present[plate]
                 events.append(_event("LEFT", plate, now, stay))
@@ -93,5 +120,5 @@ class ArriveLeaveRule:
         return events
 
 
-def _event(kind: str, plate: str, now: float, stay: Stay) -> Event:
-    return Event(kind, plate, now, stay.first_seen, stay.last_seen, stay.reads)
+def _event(kind: str, plate: str, now: float, stay: Stay, note: str = "") -> Event:
+    return Event(kind, plate, now, stay.first_seen, stay.last_seen, stay.reads, note)

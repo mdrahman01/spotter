@@ -87,7 +87,7 @@ class QueueingAlerts(ConsoleAlerts):
     def send(self, alert: Alert) -> Delivery:
         self.sent.append(alert)
         if alert.attachments:
-            self.queued.append(PhotoResult(alert.to, alert.attachments, None, 99))
+            self.queued.append(PhotoResult(alert.to, tuple(p.path for p in alert.attachments), None, 99))
             return Delivery(None, 42, "queued")
         return Delivery(None, 42, "none")
 
@@ -264,6 +264,19 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(json.loads(photos[0]["result"]), {"delivered": True, "message_id": 99, "error": None})
         self.assertEqual((scene.attendant.stats.photos_sent, scene.attendant.stats.photos_failed), (1, 0))
         self.assertEqual(scene.db.session(1)["arrival_snapshot"], SNAP)
+        self.assertRegex(alerts.sent[0].attachments[0].caption, r"^Arrived, (\w{3} \w{3} \d{1,2}, )?\d{1,2}:\d{2} (am|pm)$")  # dated: T0 is not today
+
+    def test_photo_captions_are_made_by_code_per_event(self):
+        scene = Scene([[LOOKUP], [START], [GREEN], [WELCOME], "Done."])
+        scene.arrive()
+        scene.model.script = [[LOOKUP], [("set_light", {"color": "off"})], [("end_session", {"plate": PLATE})], [("compute_bill", {"session_id": 1})],
+                              [("send_alert", {"to": "driver", "message": "Your stay has ended. The bill is $1.00."})],
+                              [("send_alert", {"to": "owner", "message": "The car has left after 22 seconds and was billed $1.00."})], "Done."]
+        scene.leave()
+        captions = [a.attachments[0].caption for a in scene.alerts.sent]
+        self.assertRegex(captions[0], r"^Arrived, ")
+        self.assertRegex(captions[-1], r"^Last seen, ")
+        self.assertEqual(scene.alerts.sent[-1].attachments[0].path, "data/snapshots/last.jpg")
 
     def test_a_light_that_does_not_respond_is_reported_once_and_the_owner_told_once(self):
         dead = DeadLight()

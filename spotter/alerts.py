@@ -42,21 +42,29 @@ PHOTO_WAIT_S = 30.0  # how long flush() waits for queued photos
 
 
 @dataclass(frozen=True)
+class Photo:
+    path: str  # repo-relative
+    caption: str  # made by code: what it shows and when, e.g. "Arrived, 2:18 pm"
+
+
+@dataclass(frozen=True)
 class Alert:
     to: str  # "owner" or "driver"
     name: str | None  # the driver's name, if known
     message: str
-    snapshot: str  # repo-relative path of the event's frame, attached by the code ("" for none)
-    photos: tuple[str, ...] = ()  # further photos, by repo-relative path (a dispute's proof)
+    snapshot: str = ""  # repo-relative path of the event's frame, attached by the code ("" for none)
+    photos: tuple[Photo, ...] = ()  # further photos with their captions (a dispute's proof)
+    snapshot_caption: str = ""  # the caption of the event's frame
 
     @property
-    def attachments(self) -> tuple[str, ...]:
+    def attachments(self) -> tuple[Photo, ...]:
         """Every photo to send after the message, the event's frame first, at most MAX_PHOTOS."""
-        seen: list[str] = []
-        for path in (self.snapshot, *self.photos):
-            if path and path not in seen:
-                seen.append(path)
-        return tuple(seen[:MAX_PHOTOS])
+        seen: dict[str, Photo] = {}
+        first = (Photo(self.snapshot, self.snapshot_caption),) if self.snapshot else ()
+        for photo in first + tuple(self.photos):
+            if photo.path and photo.path not in seen:
+                seen[photo.path] = photo
+        return tuple(seen.values())[:MAX_PHOTOS]
 
 
 @dataclass(frozen=True)
@@ -107,7 +115,7 @@ class ConsoleAlerts:
     def send(self, alert: Alert) -> Delivery:
         self.sent.append(alert)
         who = alert.to if alert.name is None else f"{alert.to} ({alert.name})"
-        photos = ", ".join(alert.attachments) or "none"
+        photos = ", ".join(f'{p.path} "{p.caption}"' if p.caption else p.path for p in alert.attachments) or "none"
         self.say(f"ALERT to {who}: {alert.message} [photos: {photos}]")
         return Delivery(None, None, "attached" if alert.attachments else "none")
 
@@ -263,7 +271,7 @@ class TelegramAlert:
         photos = alert.attachments
         self.say(
             f"ALERT to {alert.to} by Telegram (text, message_id {message_id}): {text}"
-            + (f" [photos to follow: {', '.join(photos)}]" if photos else "")
+            + (f" [photos to follow: {', '.join(p.path for p in photos)}]" if photos else "")
         )
         if photos:
             self._start_worker()
@@ -290,23 +298,27 @@ class TelegramAlert:
             finally:
                 self._queue.task_done()
 
-    def _send_photos(self, alert: Alert, paths: tuple[str, ...]) -> PhotoResult:
-        """Upload the alert's photos in one message: sendPhoto for one, sendMediaGroup for more."""
-        jpegs = [(path, shrink_jpeg(self.repo_root / path)) for path in paths]
-        missing = [path for path, jpeg in jpegs if jpeg is None]
-        jpegs = [(path, jpeg) for path, jpeg in jpegs if jpeg is not None]
-        role = alert.to.capitalize()
+    def _send_photos(self, alert: Alert, photos: tuple[Photo, ...]) -> PhotoResult:
+        """Upload the alert's photos in one message, each with its code-made caption:
+        sendPhoto for one, sendMediaGroup for more."""
+        paths = tuple(p.path for p in photos)
+        jpegs = [(photo, shrink_jpeg(self.repo_root / photo.path)) for photo in photos]
+        missing = [photo.path for photo, jpeg in jpegs if jpeg is None]
+        jpegs = [(photo, jpeg) for photo, jpeg in jpegs if jpeg is not None]
         try:
             if not jpegs:
                 raise FileNotFoundError(f"no readable photo among {', '.join(paths)}")
             if len(jpegs) == 1:
-                body, content_type = multipart({"chat_id": self.chat_id, "caption": f"{role}: photo"}, "photo", "photo.jpg", jpegs[0][1])
+                fields = {"chat_id": self.chat_id}
+                if jpegs[0][0].caption:
+                    fields["caption"] = jpegs[0][0].caption[:CAPTION_LIMIT]
+                body, content_type = multipart(fields, "photo", "photo.jpg", jpegs[0][1])
                 result = self._call("sendPhoto", body, content_type)
                 message_id = result.get("message_id")
             else:
                 media = [
-                    {"type": "photo", "media": f"attach://photo{i}", **({"caption": f"{role}: photos"} if i == 0 else {})}
-                    for i in range(len(jpegs))
+                    {"type": "photo", "media": f"attach://photo{i}", **({"caption": photo.caption[:CAPTION_LIMIT]} if photo.caption else {})}
+                    for i, (photo, _) in enumerate(jpegs)
                 ]
                 files = [(f"photo{i}", f"photo{i}.jpg", jpeg) for i, (_, jpeg) in enumerate(jpegs)]
                 body, content_type = multipart_files({"chat_id": self.chat_id, "media": json.dumps(media)}, files)
@@ -317,7 +329,8 @@ class TelegramAlert:
             self.say(f"PHOTOS for {alert.to} NOT delivered by Telegram: {error}")
             return PhotoResult(alert.to, paths, error)
         note = f" (unreadable, left out: {', '.join(missing)})" if missing else ""
-        self.say(f"PHOTOS for {alert.to} by Telegram (message_id {message_id}): {', '.join(p for p, _ in jpegs)}{note}")
+        shown = ", ".join(f'{p.path} "{p.caption}"' if p.caption else p.path for p, _ in jpegs)
+        self.say(f"PHOTOS for {alert.to} by Telegram (message_id {message_id}): {shown}{note}")
         return PhotoResult(alert.to, paths, None, message_id)
 
     def flush(self, timeout_s: float = PHOTO_WAIT_S) -> list[PhotoResult]:

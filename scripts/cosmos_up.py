@@ -211,10 +211,9 @@ def main() -> int:
     set_key(ENV_PATH, "COSMOS_TOKEN", token, quote_mode="never")
     log("saved a new random 64-hex COSMOS_TOKEN to .env")
 
-    serve = (
-        f"serve {model} --host 0.0.0.0 --port {PORT} "
-        "--max-model-len 16384 --reasoning-parser qwen3"
-    )
+    # No --reasoning-parser: in Week 1 it put the whole answer in the reasoning
+    # field and left content empty.
+    serve = f"serve {model} --host 0.0.0.0 --port {PORT} --max-model-len 16384"
     log(
         f"creating endpoint {ENDPOINT_NAME}: image {IMAGE}, command `vllm {serve}`, "
         f"{PLATFORM} {PRESET}, on-demand, no public IP, token auth"

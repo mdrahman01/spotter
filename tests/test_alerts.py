@@ -12,6 +12,7 @@ from spotter import config
 from spotter.alerts import (
     Alert,
     ConsoleAlerts,
+    Photo,
     TelegramAlert,
     TelegramSetupError,
     caption_for,
@@ -104,7 +105,7 @@ class TelegramAlertTest(unittest.TestCase):
     def test_the_message_goes_first_as_text_and_the_photo_follows(self):
         fake = FakeTelegram()
         telegram = self.alerts(fake)
-        delivery = telegram.send(Alert("owner", None, "An unbooked car is in the spot.", "data/snap.jpg"))
+        delivery = telegram.send(Alert("owner", None, "An unbooked car is in the spot.", "data/snap.jpg", snapshot_caption="Arrived, 2:18 pm"))
         self.assertTrue(delivery.delivered)
         self.assertEqual((delivery.message_id, delivery.photos), (42, "queued"))
         url, body, content_type = fake.posts[0]  # the text is already there when send() returns
@@ -115,7 +116,8 @@ class TelegramAlertTest(unittest.TestCase):
         self.assertEqual(fake.methods(), ["sendMessage", "sendPhoto"])
         url, body, content_type = fake.posts[1]
         self.assertTrue(content_type.startswith("multipart/form-data"))
-        self.assertIn(b"Owner: photo", body)
+        self.assertIn(b'name="caption"\r\n\r\nArrived, 2:18 pm\r\n', body)  # the caption code made, no role prefix
+        self.assertNotIn(b"Owner: photo", body)
         photo = body.split(b"Content-Type: image/jpeg\r\n\r\n")[1].rsplit(b"\r\n--", 1)[0]
         decoded = cv2.imdecode(np.frombuffer(photo, np.uint8), cv2.IMREAD_COLOR)
         self.assertEqual(decoded.shape[1], 1280)
@@ -127,13 +129,16 @@ class TelegramAlertTest(unittest.TestCase):
         write_image(self.root / "data", "two.jpg", 640, 480)
         fake = FakeTelegram()
         telegram = self.alerts(fake)
-        delivery = telegram.send(Alert("driver", "Dana", "Here is the proof.", "data/snap.jpg", ("data/two.jpg", "data/snap.jpg", "data/gone.jpg")))
+        proof = (Photo("data/two.jpg", "Seen after the fee began, 2:34 pm"), Photo("data/snap.jpg", "x"), Photo("data/gone.jpg", "Last seen, 2:35 pm"))
+        delivery = telegram.send(Alert("driver", "Dana", "Here is the proof.", "data/snap.jpg", proof, "Arrived, 2:18 pm"))
         self.assertEqual(delivery.photos, "queued")
         results = telegram.flush()
         self.assertEqual(fake.methods(), ["sendMessage", "sendMediaGroup"])
         body = fake.posts[1][1]
         self.assertEqual(body.count(b"Content-Type: image/jpeg"), 2)  # the missing file is left out, duplicates once
         self.assertIn(b"attach://photo0", body)
+        media = json.loads(body.split(b'name="media"\r\n\r\n')[1].split(b"\r\n--")[0])
+        self.assertEqual([m.get("caption") for m in media], ["Arrived, 2:18 pm", "Seen after the fee began, 2:34 pm"])
         self.assertEqual(results[0].paths, ("data/snap.jpg", "data/two.jpg", "data/gone.jpg"))
         self.assertTrue(results[0].delivered)
         telegram.close()
@@ -197,15 +202,15 @@ class ConsoleAlertsTest(unittest.TestCase):
     def test_console_prints_the_photos_with_the_message(self):
         printed = []
         console = ConsoleAlerts(say=printed.append)
-        delivery = console.send(Alert("owner", None, "Look.", "data/a.jpg", ("data/b.jpg",)))
+        delivery = console.send(Alert("owner", None, "Look.", "data/a.jpg", (Photo("data/b.jpg", "Last seen, 2:35 pm"),), "Arrived, 2:18 pm"))
         self.assertEqual((delivery.delivered, delivery.photos), (True, "attached"))
-        self.assertEqual(printed, ["ALERT to owner: Look. [photos: data/a.jpg, data/b.jpg]"])
+        self.assertEqual(printed, ['ALERT to owner: Look. [photos: data/a.jpg "Arrived, 2:18 pm", data/b.jpg "Last seen, 2:35 pm"]'])
         self.assertEqual(console.send(Alert("driver", "Dana", "Hi.", "")).photos, "none")
         self.assertEqual(console.flush(), [])
 
     def test_attachments_are_the_snapshot_first_then_the_photos_at_most_three(self):
-        alert = Alert("owner", None, "x", "s.jpg", ("a.jpg", "s.jpg", "b.jpg", "c.jpg"))
-        self.assertEqual(alert.attachments, ("s.jpg", "a.jpg", "b.jpg"))
+        alert = Alert("owner", None, "x", "s.jpg", tuple(Photo(p, p.upper()) for p in ("a.jpg", "s.jpg", "b.jpg", "c.jpg")), "S")
+        self.assertEqual([(p.path, p.caption) for p in alert.attachments], [("s.jpg", "S"), ("a.jpg", "A.JPG"), ("b.jpg", "B.JPG")])
         self.assertEqual(Alert("owner", None, "x", "").attachments, ())
 
 

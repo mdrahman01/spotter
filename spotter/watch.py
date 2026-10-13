@@ -53,6 +53,7 @@ from dotenv import load_dotenv
 from spotter import config
 from spotter.config import Settings
 from spotter.events import ArriveLeaveRule, Event, EventFrames
+from spotter.scene import SPOT_CLEAR, UNREADABLE_VEHICLE, SceneSettings, SceneWatch, SceneWorker, make_scene
 from spotter.live import CameraMonitor, FrameSource, WatchedClock, is_stream, mask_source
 from spotter.privacy import Masker
 from spotter.reader import PlateReader, normalize, zone_box
@@ -97,6 +98,9 @@ class Summary:
     outages: int = 0
     downtime: float = 0.0
     stopped_by_user: bool = False
+    looks: int = 0  # scene looks made
+    looks_unavailable: int = 0
+    look_latencies: list[float] = field(default_factory=list)
 
 
 class StopRequest:
@@ -147,6 +151,18 @@ def keep_awake() -> subprocess.Popen | None:
     return subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())], stdin=subprocess.DEVNULL)
 
 
+def test_drop_reads() -> Callable[[float], bool]:
+    """Test only: SPOTTER_TEST_DROP_READS=start,end[;start,end] drops every plate read while the
+    rule clock is inside a window, as if the plate were covered."""
+    spec = os.environ.get("SPOTTER_TEST_DROP_READS", "").strip()
+    windows = []
+    for part in spec.split(";"):
+        if part.strip():
+            start, end = (float(v) for v in part.split(","))
+            windows.append((start, end))
+    return lambda now: any(start <= now < end for start, end in windows)
+
+
 def test_hold() -> Callable[[float], bool] | None:
     """Test only: SPOTTER_TEST_OUTAGE=start,duration withholds frames for that window of a live run."""
     spec = os.environ.get("SPOTTER_TEST_OUTAGE", "").strip()
@@ -186,6 +202,23 @@ def run(
     summary = Summary(live, 0.0)
     plate_reader = PlateReader(settings.zone, settings.min_det_conf)
     rule = ArriveLeaveRule(settings.arrive_reads, settings.arrive_window_s, settings.leave_after_s)
+    scene = make_scene(settings.scene, os.environ, settings.spot_description, settings.scene_timeout_s, say=print)
+    scene_worker = scene_watch = None
+    if scene is not None:
+        scene_worker = SceneWorker(scene, say=lambda line: print(line, flush=True))
+        scene_watch = SceneWatch(
+            scene_worker,
+            rule,
+            SceneSettings(settings.scene_check_after_s, settings.scene_relook_every_s, settings.scene_idle_every_s,
+                          settings.scene_unreadable_after_s),
+            say=lambda line: print(line, flush=True),
+        )
+        print(
+            f"scene: {settings.scene.split(':')[0]} | look when a plate is unread {settings.scene_check_after_s:g}s,"
+            f" again every {settings.scene_relook_every_s:g}s while the car is still seen, every {settings.scene_idle_every_s:g}s while"
+            f" no car is present, unreadable vehicle after {settings.scene_unreadable_after_s:g}s | timeout {settings.scene_timeout_s:g}s"
+        )
+    drop_reads = test_drop_reads()
     print(
         f"zone {','.join(str(v) for v in settings.zone)}"
         f" | process_fps {settings.process_fps} | min_det_conf {settings.min_det_conf}"
@@ -213,6 +246,8 @@ def run(
     def log_event(event: Event, frames: EventFrames) -> None:
         append_record(
             {
+                "note": event.note or None,
+                "what": event.what or None,
                 "type": event.type,
                 "plate": event.plate,
                 "time": round(event.time, 3),
@@ -233,6 +268,10 @@ def run(
         )
         if event.type == "LEFT":
             line += f" | last read {frames.last_read_snapshot}"
+        if event.note:
+            line += f" | {event.note}"
+        if event.what:
+            line += f" | {event.what!r}"
         print(line, flush=True)
 
     def camera_event(kind: str, when: datetime, down: float | None, waited_s: float = 0, first: bool = False) -> None:
@@ -254,6 +293,8 @@ def run(
         """One checked frame: read plates, update the rule and the timers, dispatch events."""
         summary.sampled += 1
         reads = plate_reader.read(frame)
+        if drop_reads(now):
+            reads = []  # test only: the plate is "covered"
         mine = sum(read.text == masker.expected for read in reads)
         summary.reads_mine += mine
         summary.reads_other += len(reads) - mine
@@ -293,6 +334,21 @@ def run(
             timer_events = timers(now, real_at, plates)
             if timer_events:
                 dispatch(timer_events)
+        if scene_watch is not None:
+            reads_at = {plate: last_read[plate][0] for plate in rule.present if plate in last_read}
+            scene_events = []
+            for decision in scene_watch.tick(now, frame, plates, reads_at):
+                if decision.kind == "LEFT_CONFIRMED":
+                    gone = rule.leave_now(decision.plate, now, "confirmed by scene")
+                    if gone:
+                        scene_events.append(gone)
+                elif decision.kind == UNREADABLE_VEHICLE:
+                    scene_events.append(Event(UNREADABLE_VEHICLE, "", now, decision.since, now, 0, what=decision.what))
+                elif decision.kind == SPOT_CLEAR:
+                    what = scene_watch.last_report.what if scene_watch.last_report else ""
+                    scene_events.append(Event(SPOT_CLEAR, "", now, decision.since, decision.until, 0, what=what))
+            if scene_events:
+                dispatch(scene_events)
         # Frames of plates that are gone and not recently read are no longer needed.
         for plate in [p for p, (t, _, _) in last_read.items() if p not in rule.present and now - t > settings.leave_after_s]:
             del last_read[plate]
@@ -312,6 +368,11 @@ def run(
         StopRequest.restore()
         if awake is not None:
             awake.terminate()
+        if scene_worker is not None:
+            summary.looks = scene_worker.looks
+            summary.looks_unavailable = scene_worker.unavailable
+            summary.look_latencies = list(scene_worker.latencies)
+            scene_worker.stop()
         plate_reader.close()
         last_read.clear()
         gc.collect()
@@ -430,6 +491,12 @@ def print_summary(summary: Summary, masker: Masker) -> None:
     gap = "none (no plate was read twice while present)" if summary.longest_gap is None else f"{summary.longest_gap:.1f}s"
     print(f"longest gap between reads of a present plate: {gap} (leave_after_s must stay above this)")
     print(f"still present at the end: {', '.join(summary.still_present) or 'none'}")
+    if summary.looks or summary.looks_unavailable:
+        latency = ""
+        if summary.look_latencies:
+            ordered = sorted(summary.look_latencies)
+            latency = f" | latency middle {ordered[len(ordered) // 2]:.1f}s, worst {ordered[-1]:.1f}s"
+        print(f"scene looks: {summary.looks} ({summary.looks_unavailable} unavailable){latency}")
     if summary.stopped_by_user:
         print("stopped by Ctrl-C")
 

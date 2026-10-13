@@ -160,10 +160,15 @@ class StayRecordTest(unittest.TestCase):
         (scene.root / "data" / "over.jpg").unlink()
         toolbox = scene.toolbox()
         self.assertEqual(sorted(toolbox.get_stay_record()["photos_on_file"]), ["arrival", "last_read"])
-        self.assertIn("no such photo", toolbox.send_alert("driver", "Here.", ["overstay"])["error"])
-        sent = toolbox.send_alert("driver", "Here.", ["last_read", "arrival"])
-        self.assertEqual((sent["delivered"], sent["photos"], sent["name"]), (True, ["last_read", "arrival"], "Dana Driver"))
-        self.assertEqual(scene.alerts.sent[-1].attachments, ("data/last.jpg", "data/arrive.jpg"))
+        self.assertIn("no such photo", toolbox.send_alert("driver", "The fee is kept; the total is $6.00.", ["overstay"])["error"])
+        self.assertIn("must end with the decision", toolbox.send_alert("driver", "Here.", ["last_read"])["error"])
+        sent = toolbox.send_alert("driver", "The fee is kept; the total is $6.00.", ["last_read", "arrival"])
+        self.assertEqual((sent["delivered"], [p["name"] for p in sent["photos"]], sent["name"]), (True, ["last_read", "arrival"], "Dana Driver"))
+        attached = scene.alerts.sent[-1].attachments
+        self.assertEqual([p.path for p in attached], ["data/last.jpg", "data/arrive.jpg"])
+        self.assertRegex(attached[0].caption, r"^Last seen, ")
+        self.assertRegex(attached[1].caption, r"^Arrived, ")
+        self.assertEqual(sent["photos"][0]["caption"], attached[0].caption)
 
     def test_no_closed_stay(self):
         db = Database(":memory:")
@@ -184,7 +189,8 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(scene.agent.handle("I left before my booking ended. Why the fee?", NOW), CLEAN)
         self.assertEqual(scene.rows("reminder"), [])
         self.assertEqual([a.to for a in scene.alerts.sent], ["driver", "owner"])
-        self.assertEqual(scene.alerts.sent[0].attachments, ("data/over.jpg", "data/last.jpg"))
+        self.assertEqual([p.path for p in scene.alerts.sent[0].attachments], ["data/over.jpg", "data/last.jpg"])
+        self.assertRegex(scene.alerts.sent[0].attachments[0].caption, r"^Seen after the fee began, ")
         self.assertEqual(scene.session()["amount_cents"], 600)
         finish = json.loads(scene.rows("finish")[0]["result"])
         self.assertEqual((finish["model"], finish["waived"]), ("final", None))
@@ -194,13 +200,32 @@ class FinishCheckTest(unittest.TestCase):
         dispute_row = json.loads(scene.rows("dispute")[0]["result"])
         self.assertEqual(dispute_row["stay_before"]["amount_cents"], 600)
 
-    def test_a_reply_without_the_total_is_reminded(self):
+    def test_a_reply_stating_the_total_twice_is_refused_and_rewritten(self):
+        twice = ("send_alert", {"to": "driver", "message": "The fee is kept; the total is $6.00. The fee is kept; the total is $6.00.", "photos": ["overstay"]})
+        scene = Scene([[RECORD], [twice], [REPLY], [NOTE], "Done."], waive=False)
+        self.assertEqual(scene.agent.handle("Why the fee?", NOW), CLEAN)
+        refused = json.loads(scene.rows("send_alert")[0]["result"])
+        self.assertIn("more than once", refused["error"])
+        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "driver"]), 1)
+
+    def test_no_photos_go_out_with_a_waiver(self):
+        waive = ("waive_overstay_fee", {"reason": "driver apologised"})
+        with_photos = ("send_alert", {"to": "driver", "message": "The fee is waived; the total is $1.00.", "photos": ["overstay"]})
+        without = ("send_alert", {"to": "driver", "message": "The fee is waived; the total is $1.00."})
+        note = ("send_alert", {"to": "owner", "message": "The driver apologised; the fee was waived; the total is $1.00."})
+        scene = Scene([[RECORD], [waive], [with_photos], [without], [note], "Done."])
+        self.assertEqual(scene.agent.handle("Sorry, I was late. Can you drop the fee?", NOW), CLEAN)
+        refused = json.loads(scene.rows("send_alert")[0]["result"])
+        self.assertIn("no photos with a waiver", refused["error"])
+        self.assertTrue(all(not a.attachments for a in scene.alerts.sent))
+
+    def test_a_reply_without_the_total_is_refused_before_it_goes_out(self):
         vague = ("send_alert", {"to": "driver", "message": "The fee applies because the car stayed on.", "photos": ["overstay"]})
-        scene = Scene([[RECORD], [vague], [NOTE], "Done.", [REPLY], "Added the total."], waive=False)
-        self.assertEqual(scene.agent.handle("Why the fee?", NOW), AFTER_REMINDER)
-        told = json.loads(scene.rows("reminder")[0]["result"])["told"]
-        self.assertIn("the total $6.00", told)
-        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "driver"]), 2)
+        scene = Scene([[RECORD], [vague], [REPLY], [NOTE], "Done."], waive=False)
+        self.assertEqual(scene.agent.handle("Why the fee?", NOW), CLEAN)
+        refused = json.loads(scene.rows("send_alert")[0]["result"])
+        self.assertIn("must end with the decision (the fee is kept) and the total $6.00", refused["error"])
+        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "driver"]), 1)  # one message reaches the driver
 
     def test_the_owner_note_forgotten_then_sent_after_the_reminder(self):
         scene = Scene([[RECORD], [REPLY], "Done.", [NOTE], "Told the owner."], waive=False)
@@ -221,7 +246,7 @@ class FinishCheckTest(unittest.TestCase):
 
     def test_a_waiver_must_reach_both_with_the_new_total(self):
         waive = ("waive_overstay_fee", {"reason": "driver apologised, a few minutes late"})
-        sorry = ("send_alert", {"to": "driver", "message": "No problem, the fee is waived. Your new total is $1.00.", "photos": ["last_read"]})
+        sorry = ("send_alert", {"to": "driver", "message": "No problem, the fee is waived. Your new total is $1.00."})
         scene = Scene([[RECORD], [waive], [sorry], "Waived the fee and told the driver.", "Nothing more."])
         self.assertEqual(scene.agent.handle("Sorry, I was a few minutes late. Can you drop the fee?", NOW), BY_CODE)
         session = scene.session()
@@ -230,6 +255,7 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(len(owner), 1)
         self.assertIn("$1.00", owner[0].message)
         self.assertIn("waived", owner[0].message)
+        self.assertEqual(owner[0].attachments, ())  # no photos with a waiver, by code too
         self.assertEqual(json.loads(scene.rows("finish")[0]["result"])["waived"], {"cents": 500, "new_total": "$1.00"})
         words = json.loads(scene.rows("words")[0]["arguments"])["supplied"]
         self.assertIn("$1.00", words)

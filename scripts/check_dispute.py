@@ -7,7 +7,8 @@ stay it was about. Only delivered alerts count. Prints no plate text and no
 message text.
 
 Required for every dispute:
-  a reply to the driver giving the bill's total, and a note to the owner, were delivered;
+  a reply to the driver giving the decision and the bill's total once, not twice, and a
+  note to the owner, were delivered; with a waiver no photos go out;
   every clock time, duration and amount in them was supplied by code (the
   event's "words" row lists what code supplied);
   if the fee was waived, the bill on record is the old total less the fee and
@@ -57,7 +58,7 @@ def main() -> int:
     rows = [a for a in disputes if a["event"] == disputes[-1]["event"]]
 
     before, alerts, supplied, waived, finish, photo_failures = None, [], [], None, {}, []
-    waive_refusals = []
+    waive_refusals, notes = [], []
     for row in rows:
         tool, args, result = row["tool"], load_json(row["arguments"]), load_json(row["result"])
         if tool == "dispute":
@@ -70,6 +71,8 @@ def main() -> int:
             photo_failures.append(result.get("error"))
         elif tool == "send_alert" and "error" not in result:
             alerts.append((args.get("to"), args.get("message") or "", bool(result.get("delivered")), tuple(args.get("photos") or ())))
+        elif tool == "send_alert":
+            notes.append(f"a message was refused by code and rewritten: {result['error'][:90]}")
         elif tool == "waive_overstay_fee":
             if "error" in result:
                 waive_refusals.append(result["error"])
@@ -83,10 +86,13 @@ def main() -> int:
         )
 
     stay = db.session(event["session_id"]) if event.get("session_id") else None
-    failures, notes = [], []
+    failures = []
     total = f"${stay['amount_cents'] / 100:.2f}" if stay and stay["amount_cents"] is not None else None
+    driver_replies = [m for to, m, ok, _ in alerts if to == "driver" and ok]
+    once = all(m.count(total) <= 1 and m.lower().count("waived") <= 1 and m.lower().count("kept") <= 1 for m in driver_replies) if total else True
     required = [
         (f"reply to the driver delivered, with the total {total}", has("driver", total)),
+        ("the decision and the total stated once, not twice", bool(driver_replies) and once),
         ("note to the owner delivered", has("owner")),
     ]
 
@@ -104,6 +110,7 @@ def main() -> int:
         new_total = waived.get("new_total")
         expected_cents = (before["amount_cents"] - (stay["waived_cents"] or 0)) if before and stay else None
         required += [
+            ("no photos with a waiver", all(not names for to, _, ok, names in alerts if ok)),
             ("waiver on record", bool(stay and stay["fee_waived_at"])),
             (f"bill on record is the old total less the fee ({new_total})", bool(stay) and stay["amount_cents"] == expected_cents),
             (f"driver told the new total {new_total}", has("driver", new_total)),

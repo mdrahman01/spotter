@@ -19,14 +19,16 @@ class Masker:
             self._rules.append((_pattern(expected), "MINE"))
 
     def label(self, plate: str) -> str:
-        """How this plate is shown: its text, or MINE/OTHER with --expect."""
+        """How this plate is shown: its text, or MINE/OTHER with --expect; VEHICLE when there is no plate."""
+        if not plate:
+            return "VEHICLE"
         if self.expected is None:
             return plate
         return "MINE" if plate == self.expected else "OTHER"
 
     def for_event(self, plate: str) -> None:
         """Also mask the plate of the event now being handled."""
-        if self.expected is not None and plate != self.expected:
+        if plate and self.expected is not None and plate != self.expected:
             self._rules = self._rules[:1] + [(_pattern(plate), "OTHER")]
 
     def mask(self, text: str) -> str:
