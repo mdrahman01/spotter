@@ -194,6 +194,14 @@ class FinishCheckTest(unittest.TestCase):
         dispute_row = json.loads(scene.rows("dispute")[0]["result"])
         self.assertEqual(dispute_row["stay_before"]["amount_cents"], 600)
 
+    def test_a_reply_without_the_total_is_reminded(self):
+        vague = ("send_alert", {"to": "driver", "message": "The fee applies because the car stayed on.", "photos": ["overstay"]})
+        scene = Scene([[RECORD], [vague], [NOTE], "Done.", [REPLY], "Added the total."], waive=False)
+        self.assertEqual(scene.agent.handle("Why the fee?", NOW), AFTER_REMINDER)
+        told = json.loads(scene.rows("reminder")[0]["result"])["told"]
+        self.assertIn("the total $6.00", told)
+        self.assertEqual(len([a for a in scene.alerts.sent if a.to == "driver"]), 2)
+
     def test_the_owner_note_forgotten_then_sent_after_the_reminder(self):
         scene = Scene([[RECORD], [REPLY], "Done.", [NOTE], "Told the owner."], waive=False)
         self.assertEqual(scene.agent.handle("Why the fee?", NOW), AFTER_REMINDER)
@@ -207,7 +215,7 @@ class FinishCheckTest(unittest.TestCase):
         self.assertEqual(scene.agent.handle("Why the fee?", NOW), BY_CODE)
         by_code = [json.loads(a["arguments"]) for a in scene.rows("send_alert")]
         self.assertEqual([(a["to"], a["photos"]) for a in by_code], [("driver", ["overstay", "last_read"]), ("owner", [])])
-        self.assertIn("$6.00", by_code[0]["message"])
+        self.assertIn("the fee is kept; the total is $6.00", by_code[0]["message"])
         self.assertIn("$6.00", by_code[1]["message"])
         self.assertEqual(scene.agent.stats.code_items, 2)
 

@@ -55,15 +55,18 @@ def main() -> int:
         asyncio.run(discover(username, password))
         return 0
     light = KasaLight(args.host, username, password, args.brightness)
-    for color in ("green", "amber", "red", "off"):
-        started = time.perf_counter()
-        try:
-            light.set(color)
-        except LightError as err:
-            print(f"{color}: FAILED after {time.perf_counter() - started:.2f}s: {err}")
-            return 1
-        print(f"{color}: {time.perf_counter() - started:.2f}s")
-        time.sleep(2)
+    try:
+        for color in ("green", "amber", "red", "off"):
+            started = time.perf_counter()
+            try:
+                light.set(color)
+            except LightError as err:
+                print(f"{color}: FAILED after {time.perf_counter() - started:.2f}s: {err}")
+                return 1
+            print(f"{color}: {time.perf_counter() - started:.2f}s")
+            time.sleep(2)
+    finally:
+        light.close()  # or the bulb's connection is left open and aiohttp complains at exit
     return 0
 
 

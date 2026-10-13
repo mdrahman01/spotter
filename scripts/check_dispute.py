@@ -7,7 +7,7 @@ stay it was about. Only delivered alerts count. Prints no plate text and no
 message text.
 
 Required for every dispute:
-  a reply to the driver and a note to the owner were delivered;
+  a reply to the driver giving the bill's total, and a note to the owner, were delivered;
   every clock time, duration and amount in them was supplied by code (the
   event's "words" row lists what code supplied);
   if the fee was waived, the bill on record is the old total less the fee and
@@ -84,7 +84,11 @@ def main() -> int:
 
     stay = db.session(event["session_id"]) if event.get("session_id") else None
     failures, notes = [], []
-    required = [("reply to the driver delivered", has("driver")), ("note to the owner delivered", has("owner"))]
+    total = f"${stay['amount_cents'] / 100:.2f}" if stay and stay["amount_cents"] is not None else None
+    required = [
+        (f"reply to the driver delivered, with the total {total}", has("driver", total)),
+        ("note to the owner delivered", has("owner")),
+    ]
 
     allowed = set().union(*(time_tokens(w) | money_tokens(w) for w in supplied)) if supplied else set()
     stated = set().union(*(time_tokens(m) | money_tokens(m) for _, m, _, _ in alerts)) if alerts else set()
