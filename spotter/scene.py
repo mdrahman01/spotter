@@ -33,6 +33,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from spotter import services
 from spotter.alerts import http_json
 from spotter.events import ArriveLeaveRule
 
@@ -159,6 +160,7 @@ class CosmosScene:
         except Exception as err:  # timeouts, HTTP errors, malformed replies
             self.last_error = f"{type(err).__name__}: {err}".replace(self._token, "[REDACTED]")[:200]
             return None
+        services.note(services.COSMOS, time.perf_counter() - started)
         report = parse_report(content, time.perf_counter() - started)
         if report is None:
             self.last_error = f"not the JSON asked for: {content[:120]!r}"

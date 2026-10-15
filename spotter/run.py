@@ -31,6 +31,7 @@ from openai import OpenAI
 from spotter import watch
 from spotter.alerts import Alert, TelegramSetupError, make_alerts
 from spotter.attendant import BASE_URL, Attendant
+from spotter.dashboard import Dashboard, LiveState
 from spotter.db import Database, iso
 from spotter.dispute import DisputeAgent, GoodwillRule
 from spotter.events import Event
@@ -106,6 +107,17 @@ def main() -> int:
     )
     timer = StayTimer(db, settings.ending_soon_s, settings.overstay_grace_s)
 
+    live_state = LiveState()
+    dashboard = None
+    if settings.dashboard:
+        dashboard = Dashboard(settings, live_state, light)
+        try:
+            url = dashboard.start()
+        except OSError as err:
+            print(f"the dashboard cannot start on port {settings.dashboard_port}: {err}", file=sys.stderr)
+            return 2
+        print(f"dashboard: {url} (the page polls every 2 s; it changes nothing)")
+
     # Driver messages come in on their own thread and are answered there, with a
     # database connection of their own; the watcher never waits for them.
     inbox = None
@@ -179,14 +191,20 @@ def main() -> int:
 
     try:
         summary = watch.run(
-            settings, masker, attendant.handle, timers, args.replay_base_time, live=args.live, on_camera=on_camera
+            settings, masker, attendant.handle, timers, args.replay_base_time, live=args.live, on_camera=on_camera,
+            live_state=live_state,
         )
+        if dashboard is not None and settings.dashboard_hold_s > 0:
+            print(f"dashboard: holding the page for {settings.dashboard_hold_s:g}s after the end", flush=True)
+            time.sleep(settings.dashboard_hold_s)
     except (FileNotFoundError, RuntimeError) as err:
         print(err, file=sys.stderr)
         return 2
     finally:
         if inbox is not None:
             inbox.stop()
+        if dashboard is not None:
+            dashboard.stop()
         alerts.close()  # photos still uploading get their chance
         db.close()
     watch.print_summary(summary, masker)

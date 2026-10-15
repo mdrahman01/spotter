@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spotter</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --card-2: #1f232c; --line: #2a2f3a;
+    --text: #eef1f6; --muted: #9aa3b2; --dim: #6b7382;
+    --green: #35d07f; --red: #ff5c5c; --amber: #ffb02e; --off: #3a4050; --accent: #35d07f;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 18px; line-height: 1.35; }
+  body[data-light="green"] { --accent: var(--green); }
+  body[data-light="red"] { --accent: var(--red); }
+  body[data-light="amber"] { --accent: var(--amber); }
+  body[data-light="off"] { --accent: #7c8798; }
+  main { max-width: 1480px; margin: 0 auto; padding: 20px 24px 28px; display: grid; gap: 18px;
+    grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
+    grid-template-areas: "header header" "camera stay" "timeline timeline" "today today" "footer footer"; }
+  header { grid-area: header; display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 24px; }
+  header h1 { font-size: 34px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+  header .brand { font-size: 14px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 2px; }
+  .stat { display: flex; flex-direction: column; gap: 2px; }
+  .stat .label { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .stat .value { font-size: 26px; font-weight: 600; }
+  .stat .value small { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 8px; }
+  .light { display: flex; align-items: center; gap: 14px; margin-left: auto; }
+  .disc { width: 64px; height: 64px; border-radius: 50%; background: var(--off); border: 3px solid #2d3340;
+    box-shadow: inset 0 0 0 2px rgba(0,0,0,0.25); transition: background 0.3s, box-shadow 0.3s; }
+  .disc.green { background: var(--green); box-shadow: 0 0 26px rgba(53,208,127,0.55); }
+  .disc.red { background: var(--red); box-shadow: 0 0 26px rgba(255,92,92,0.55); }
+  .disc.amber { background: var(--amber); box-shadow: 0 0 26px rgba(255,176,46,0.55); }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
+    background: var(--card-2); border: 1px solid var(--line); font-size: 18px; color: var(--text); }
+  .pill .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  .pill.live .dot { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  .pill.offline .dot { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  .pill.replay .dot { background: var(--amber); }
+  section.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; min-width: 0; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  #camera { grid-area: camera; }
+  #camera img { width: 100%; height: auto; display: block; border-radius: 10px; background: #000; aspect-ratio: 16 / 9; object-fit: contain; }
+  #camera .under { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 12px; }
+  #stay { grid-area: stay; display: flex; flex-direction: column; }
+  .plate { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 40px; font-weight: 700; letter-spacing: 0.08em;
+    background: #f4f1e6; color: #111; border-radius: 8px; padding: 6px 14px; display: inline-block; border: 3px solid #cfc8b0; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 18px; margin-top: 14px; font-size: 19px; }
+  .kv .k { color: var(--muted); }
+  .empty { font-size: 30px; color: var(--muted); margin: auto 0 8px; text-align: center; padding: 30px 0 0; }
+  .notice { border-left: 5px solid var(--red); padding: 10px 14px; background: var(--card-2); border-radius: 8px; font-size: 19px; }
+  .fee { color: var(--amber); font-weight: 600; }
+  #timeline { grid-area: timeline; }
+  table { width: 100%; border-collapse: collapse; font-size: 18px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: var(--card-2); }
+  tr.row td:first-child::before { content: "▸"; display: inline-block; width: 18px; color: var(--dim); }
+  tr.row.open td:first-child::before { content: "▾"; }
+  tr.detail td { background: #13161c; padding: 12px 16px 14px 38px; }
+  .kind { font-weight: 600; }
+  .how { color: var(--muted); }
+  .how.clean { color: var(--green); }
+  .how.reminder { color: var(--amber); }
+  .how.code { color: var(--red); }
+  .calls { display: grid; gap: 8px; font-size: 16px; }
+  .call { display: grid; grid-template-columns: 170px 1fr; gap: 12px; }
+  .call .name { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); }
+  .call .name.code { color: var(--amber); }
+  .call .args, .call .res { color: var(--muted); word-break: break-word; }
+  .call .res { color: var(--text); }
+  .call .err { color: var(--red); }
+  .closing { margin-top: 10px; font-style: italic; color: var(--muted); font-size: 16px; }
+  #today { grid-area: today; display: flex; gap: 36px; flex-wrap: wrap; align-items: baseline; }
+  #today .stat .value { font-size: 30px; }
+  footer { grid-area: footer; display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 15px; }
+  footer .svc { display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+  footer .svc .dot { width: 11px; height: 11px; border-radius: 50%; background: #3a4050; }
+  footer .svc.lit .dot { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  footer .svc .lat { color: var(--text); font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .time { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  @media (max-width: 1000px) {
+    main { grid-template-columns: 1fr; grid-template-areas: "header" "camera" "stay" "timeline" "today" "footer"; }
+    header h1 { font-size: 28px; }
+  }
+</style>
+</head>
+<body data-light="off">
+<main>
+  <header>
+    <div>
+      <div class="brand">Spotter</div>
+      <h1 id="lot">My driveway</h1>
+    </div>
+    <div class="stat">
+      <div class="label">Tonight's price</div>
+      <div class="value"><span id="price">—</span><small id="level"></small></div>
+    </div>
+    <div class="stat">
+      <div class="label">Camera</div>
+      <div class="value"><span class="pill" id="camera-pill"><span class="dot"></span><span id="camera-text">starting</span></span></div>
+    </div>
+    <div class="light">
+      <div class="stat" style="text-align:right">
+        <div class="label">Signal light</div>
+        <div class="value" id="light-text">off</div>
+      </div>
+      <div class="disc" id="disc"></div>
+    </div>
+  </header>
+
+  <section class="card" id="camera">
+    <h2>Live frame</h2>
+    <img id="frame" alt="camera frame" src="/frame.jpg">
+    <div class="under">
+      <div class="stat"><div class="label">Last plate read</div><div class="value" id="last-read">—</div></div>
+      <div class="stat"><div class="label">Scene check</div><div class="value" id="scene" style="font-size:19px;font-weight:500">off</div></div>
+      <div class="stat"><div class="label">Frame</div><div class="value" id="frame-at" style="font-size:19px;font-weight:500">—</div></div>
+    </div>
+  </section>
+
+  <section class="card" id="stay">
+    <h2>Current stay</h2>
+    <div id="stay-body"><div class="empty">Spot empty</div></div>
+  </section>
+
+  <section class="card" id="timeline">
+    <h2>Timeline</h2>
+    <table>
+      <thead><tr><th>Time</th><th>Event</th><th>Plate</th><th>Finished</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section class="card" id="today">
+    <div class="stat"><div class="label">Today</div><div class="value" id="today-stays">0 stays</div></div>
+    <div class="stat"><div class="label">Revenue</div><div class="value" id="today-revenue">$0.00</div></div>
+    <div class="stat"><div class="label">Fees waived</div><div class="value" id="today-waived">$0.00</div></div>
+    <div class="stat"><div class="label">Disputes</div><div class="value" id="today-disputes">0</div></div>
+    <div class="stat" style="margin-left:auto"><div class="label">Updated</div><div class="value" id="updated" style="font-size:20px;font-weight:500">—</div></div>
+  </section>
+
+  <footer id="footer"></footer>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const open = new Set();  // timeline rows the viewer expanded, by key
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  const howClass = (how) => how.includes("clean") ? "clean" : how.includes("reminder") ? "reminder" : how.includes("code") ? "code" : "";
+  const last_plate = (last) => last.plate;
+  const howText = (how) => how === "clean" ? "clean" : how === "after a reminder" ? "after a reminder" : how === "completed by code" ? "completed by code" : how === "by code" ? "by code" : how || "";
+
+  function renderStay(s) {
+    const body = $("stay-body");
+    if (s.stay) {
+      const st = s.stay;
+      body.innerHTML = `
+        <div class="plate">${esc(st.plate)}</div>
+        <div class="kv">
+          <div class="k">Driver</div><div>${esc(st.driver || "—")}</div>
+          <div class="k">Arrived</div><div>${esc(st.arrived)}</div>
+          <div class="k">Time so far</div><div>${esc(st.so_far)}</div>
+          <div class="k">Booking ends</div><div>${esc(st.booking_ends || "—")}${st.ending_soon && !st.overstaying ? ' <span class="muted">(ending soon)</span>' : ""}</div>
+          ${st.overstaying ? `<div class="k">Overstaying</div><div class="fee">fee ${esc(st.fee)} applies</div>` : ""}
+        </div>`;
+    } else if (s.unreadable) {
+      body.innerHTML = `<div class="notice">A vehicle is in the spot and its plate cannot be read.<br><span class="muted">${esc(s.unreadable)}</span></div>`;
+    } else {
+      const last = s.last_stay ? `<div class="muted" style="text-align:center;font-size:17px">Last stay: ${esc(last_plate(s.last_stay))}, left ${esc(s.last_stay.left)}${s.last_stay.billed ? ", billed " + esc(s.last_stay.billed) : ""}</div>` : "";
+      body.innerHTML = `<div class="empty">Spot empty</div>${last}`;
+    }
+  }
+
+  function renderTimeline(rows) {
+    const tbody = $("rows");
+    tbody.innerHTML = "";
+    rows.forEach((r, i) => {
+      const key = `${r.time}|${r.kind}|${r.plate}|${rows.length - i}`;
+      const tr = document.createElement("tr");
+      tr.className = "row" + (open.has(key) ? " open" : "");
+      tr.innerHTML = `<td class="time">${esc(r.time)}</td><td class="kind">${esc(r.kind.replace(/_/g, " "))}${r.detail ? ` <span class="muted">· ${esc(r.detail)}</span>` : ""}</td>` +
+        `<td>${esc(r.plate || "—")}</td><td class="how ${howClass(r.how)}">${esc(howText(r.how))}</td>`;
+      tr.onclick = () => { open.has(key) ? open.delete(key) : open.add(key); renderTimeline(rows); };
+      tbody.appendChild(tr);
+      if (open.has(key)) {
+        const d = document.createElement("tr");
+        d.className = "detail";
+        const calls = r.calls.map((c) => {
+          const name = `${esc(c.tool)}${c.by_code ? " (by code)" : ""}`;
+          const args = Object.entries(c.arguments || {}).map(([k, v]) => `<span class="muted">${esc(k)}</span> ${esc(v)}`).join(" &nbsp;·&nbsp; ");
+          const res = c.error ? `<span class="err">${esc(c.error)}</span>` :
+            Object.entries(c.result || {}).filter(([k]) => k !== "error").map(([k, v]) => `<span class="muted">${esc(k)}</span> ${esc(v)}`).join(" &nbsp;·&nbsp; ");
+          return `<div class="call"><div class="name${c.by_code ? " code" : ""}">${name}</div><div><div class="args">${args || "<span class='muted'>no arguments</span>"}</div><div class="res">→ ${res || "ok"}</div></div></div>`;
+        }).join("");
+        d.innerHTML = `<td colspan="4"><div class="calls">${calls || "<span class='muted'>no tool calls</span>"}</div>` +
+          (r.closing ? `<div class="closing">“${esc(r.closing)}”</div>` : "") + `</td>`;
+        tbody.appendChild(d);
+      }
+    });
+  }
+
+  function renderFooter(services) {
+    $("footer").innerHTML = services.map((s) =>
+      `<span class="svc${s.recent ? " lit" : ""}"><span class="dot"></span>${esc(s.name)}` +
+      (s.last_latency_s != null ? ` <span class="lat">${s.last_latency_s.toFixed(1)} s</span>` : ` <span class="muted">not used</span>`) + `</span>`).join("");
+  }
+
+  function render(s) {
+    $("lot").textContent = s.lot_name;
+    $("price").textContent = s.price.words;
+    $("level").textContent = s.price.level + (s.price.until ? ` · until ${s.price.until}` : "");
+    document.body.dataset.light = s.light || "off";
+    $("disc").className = "disc " + (s.light || "off");
+    $("light-text").textContent = s.light || "off";
+    const cam = s.camera;
+    const pill = $("camera-pill");
+    let text = cam.state;
+    if (cam.state === "offline") text = `offline${cam.for ? " for " + cam.for : ""}`;
+    else if (cam.state === "replay") text = `replay${cam.replay ? " · " + cam.replay : ""}`;
+    else if (cam.state === "live") text = "live";
+    pill.className = "pill " + cam.state;
+    $("camera-text").textContent = text;
+    $("last-read").textContent = s.last_read ? `${s.last_read.plate}  ·  ${s.last_read.at}` : "none yet";
+    if (!s.scene.enabled) $("scene").textContent = "off";
+    else if (!s.scene.report) $("scene").textContent = "on, no look yet";
+    else { const r = s.scene.report; $("scene").textContent = `${r.vehicle_in_driveway ? "vehicle" : "no vehicle"}${r.what ? ": " + r.what : ""} · ${r.at}`; }
+    $("frame-at").textContent = s.frame_at || "—";
+    renderStay(s);
+    renderTimeline(s.timeline);
+    renderFooter(s.services);
+    $("today-stays").textContent = `${s.today.stays} stay${s.today.stays === 1 ? "" : "s"}`;
+    $("today-revenue").textContent = s.today.revenue;
+    $("today-waived").textContent = `${s.today.fees_waived}${s.today.fees_waived_count ? " (" + s.today.fees_waived_count + ")" : ""}`;
+    $("today-disputes").textContent = s.today.disputes;
+    $("updated").textContent = s.generated_at;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/state.json", {cache: "no-store"});
+      if (r.ok) render(await r.json());
+    } catch (e) { /* the worker may be busy; try again */ }
+  }
+  function refreshFrame() { $("frame").src = "/frame.jpg?t=" + Date.now(); }
+  poll(); refreshFrame();
+  setInterval(poll, 2000);
+  setInterval(refreshFrame, 2000);
+})();
+</script>
+</body>
+</html>

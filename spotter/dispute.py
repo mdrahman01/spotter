@@ -30,6 +30,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from spotter import services
 from spotter.alerts import Alert, Alerts, MAX_PHOTOS, Photo
 from spotter.attendant import ATTEMPTS, reasoning_tokens, usage_line
 from spotter.db import Database, iso, parse
@@ -501,6 +502,7 @@ class DisputeAgent:
                 self.masker.print(f"MODEL call failed (attempt {attempt} of {ATTEMPTS}): {self._safe(err)}")
                 continue
             latency = time.perf_counter() - start
+            services.note(services.model_service(self.model), latency)
             usage = body.get("usage") or {}
             self.stats.model_calls += 1
             self.stats.latencies.append(latency)

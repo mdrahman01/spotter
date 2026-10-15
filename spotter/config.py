@@ -112,6 +112,11 @@ class Settings:
     lot_area: str = field(default="", metadata={"help": "where the lot is, for the event search (never printed)"})
     event_radius_miles: float = field(default=5, metadata={"help": "events within this many miles count"})
     price_check_at: str = field(default="", metadata={"help": "local time HH:MM of the daily price check (empty: none)"})
+    price_model: str = field(default="nvidia/Nemotron-3_5-Lightning", metadata={"help": "the model that decides tonight's price (Lightning followed the tool rules best; Ultra is the cautious alternative)"})
+    dashboard: bool = field(default=False, metadata={"help": "serve the owner's page at http://localhost:<dashboard_port> (on/off)"})
+    dashboard_port: int = field(default=8000, metadata={"help": "the dashboard's port"})
+    dashboard_hold_s: float = field(default=0, metadata={"help": "keep serving the dashboard this long after a replay ends"})
+    lot_name: str = field(default="My driveway", metadata={"help": "the lot's name in the dashboard header"})
 
     def __post_init__(self) -> None:
         x0, y0, x1, y1 = self.zone
@@ -151,6 +156,12 @@ class Settings:
             raise ValueError("event_radius_miles must be above 0")
         if self.price_check_at and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", self.price_check_at):
             raise ValueError(f"price_check_at must be HH:MM, got {self.price_check_at!r}")
+        if not 0 <= self.dashboard_port <= 65535:
+            raise ValueError("dashboard_port must be between 0 (any free port) and 65535")
+        if self.dashboard_hold_s < 0:
+            raise ValueError("dashboard_hold_s must not be negative")
+        if not self.price_model.strip():
+            raise ValueError("price_model must not be empty")
 
 
 def parse_zone(text: str) -> Zone:
@@ -209,6 +220,11 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "lot_area": str,
     "event_radius_miles": float,
     "price_check_at": str,
+    "price_model": str,
+    "dashboard": parse_bool,
+    "dashboard_port": int,
+    "dashboard_hold_s": float,
+    "lot_name": str,
 }
 
 
@@ -231,12 +247,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         default = setting.default
         if setting.name == "zone":
             default = ",".join(str(v) for v in default)
+        extra = {"nargs": "?", "const": True} if parse is parse_bool else {}  # --dashboard alone means on
         parser.add_argument(
             "--" + setting.name.replace("_", "-"),
             type=checked,
             default=None,
             help=f"{setting.metadata['help']} "
             f"(default {default}; env {env_name(setting.name)})",
+            **extra,
         )
 
 

@@ -22,6 +22,7 @@ from datetime import datetime
 
 from openai import OpenAI
 
+from spotter import services
 from spotter.alerts import Alert, Alerts
 from spotter.db import Database, iso, parse
 from spotter.events import Event, EventFrames
@@ -355,6 +356,7 @@ class Attendant:
                 )
                 continue
             latency = time.perf_counter() - start
+            services.note(services.model_service(self.model), latency)
             usage = body.get("usage") or {}
             self.stats.model_calls += 1
             self.stats.latencies.append(latency)

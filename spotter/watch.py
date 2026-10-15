@@ -197,6 +197,7 @@ def run(
     base_time: datetime | None = None,
     live: bool = False,
     on_camera: CameraHandler | None = None,
+    live_state=None,
 ) -> Summary:
     """Replay a file, or follow a camera (or a file played live) until it ends or Ctrl-C.
 
@@ -215,6 +216,13 @@ def run(
     if not live and not Path(source).is_file():
         raise FileNotFoundError(f"no such video file: {source}")
     summary = Summary(live, 0.0)
+    if live_state is not None:
+        live_state.set_scene(settings.scene != "off")
+        if live:
+            live_state.set_camera("starting")
+        else:
+            live_state.replay_name = Path(source).name
+            live_state.set_camera("replay")
     plate_reader = PlateReader(settings.zone, settings.min_det_conf)
     rule = ArriveLeaveRule(settings.arrive_reads, settings.arrive_window_s, settings.leave_after_s)
     scene = make_scene(settings.scene, os.environ, settings.spot_description, settings.scene_timeout_s, say=print)
@@ -291,6 +299,11 @@ def run(
         print(line, flush=True)
 
     def camera_event(kind: str, when: datetime, down: float | None, waited_s: float = 0, first: bool = False) -> None:
+        if live_state is not None:
+            if kind == CAMERA_OFFLINE:
+                live_state.set_camera("offline", when, "no frames")
+            else:
+                live_state.set_camera("live", when, f"back after {duration_words(down or 0)}")
         summary.events[kind] += 1
         if kind == CAMERA_BACK and down is not None:
             summary.downtime += down
@@ -308,6 +321,8 @@ def run(
     def process(frame: np.ndarray, now: float, real_at: datetime) -> None:
         """One checked frame: read plates, update the rule and the timers, dispatch events."""
         summary.sampled += 1
+        if live_state is not None:
+            live_state.set_frame(frame, real_at)
         if live and (eval_saved_at[0] is None or (real_at - eval_saved_at[0]).total_seconds() >= EVAL_EVERY_S):
             eval_saved_at[0] = real_at
             save_eval_frame(frame, real_at, bool(rule.present))
@@ -324,6 +339,8 @@ def run(
                 gap = now - last_read[plate][0]
                 summary.longest_gap = gap if summary.longest_gap is None else max(summary.longest_gap, gap)
             last_read[plate] = (now, real_at, frame)
+            if live_state is not None:
+                live_state.set_read(plate, real_at)
         snapshot = None
 
         def frames_for(event: Event) -> EventFrames:
@@ -357,6 +374,10 @@ def run(
         if scene_watch is not None:
             reads_at = {plate: last_read[plate][0] for plate in rule.present if plate in last_read}
             scene_events = []
+            if live_state is not None and scene_watch.last_report is not None:
+                report = scene_watch.last_report
+                live_state.set_scene(True, {"vehicle_in_driveway": report.vehicle_in_driveway, "plate_visible": report.plate_visible,
+                                            "what": report.what, "at": clock_words(real_at)})
             for decision in scene_watch.tick(now, frame, plates, reads_at):
                 if decision.kind == "LEFT_CONFIRMED":
                     gone = rule.leave_now(decision.plate, now, "confirmed by scene")
@@ -364,9 +385,15 @@ def run(
                         scene_events.append(gone)
                 elif decision.kind == UNREADABLE_VEHICLE:
                     scene_events.append(Event(UNREADABLE_VEHICLE, "", now, decision.since, now, 0, what=decision.what))
+                    if live_state is not None:
+                        live_state.set_unreadable(decision.what or "a vehicle")
                 elif decision.kind == SPOT_CLEAR:
                     what = scene_watch.last_report.what if scene_watch.last_report else ""
                     scene_events.append(Event(SPOT_CLEAR, "", now, decision.since, decision.until, 0, what=what))
+                    if live_state is not None:
+                        live_state.set_unreadable(None)
+            if live_state is not None and rule.present:
+                live_state.set_unreadable(None)
             if scene_events:
                 dispatch(scene_events)
         # Frames of plates that are gone and not recently read are no longer needed.
@@ -378,7 +405,7 @@ def run(
     awake = keep_awake() if live else None
     try:
         if live:
-            run_live(settings, summary, process, camera_event, stop)
+            run_live(settings, summary, process, camera_event, stop, live_state)
         else:
             run_replay(settings, summary, process, base_time, stop)
     except KeyboardInterrupt:
@@ -442,7 +469,7 @@ def run_replay(settings: Settings, summary: Summary, process, base_time: datetim
         capture.release()
 
 
-def run_live(settings: Settings, summary: Summary, process, camera_event, stop: StopRequest) -> None:
+def run_live(settings: Settings, summary: Summary, process, camera_event, stop: StopRequest, live_state=None) -> None:
     """The newest frame, process_fps times a second, until the source ends or Ctrl-C."""
     source = settings.source
     kind = "camera" if is_stream(source) else "file played live"
@@ -478,6 +505,8 @@ def run_live(settings: Settings, summary: Summary, process, camera_event, stop: 
                 x0, y0, x1, y1 = zone_box(settings.zone, frames.width, frames.height)
                 print(f"first frame: {frames.width}x{frames.height} | zone in pixels: x {x0}-{x1}, y {y0}-{y1}", flush=True)
                 announced = True
+                if live_state is not None and live_state.camera != "offline":
+                    live_state.set_camera("live", datetime.now(timezone.utc))
             down = monitor.frame(captured_at)
             if down is not None:
                 camera_event(CAMERA_BACK, datetime.fromtimestamp(captured_at, timezone.utc), down)

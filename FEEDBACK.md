@@ -496,3 +496,40 @@ first three checks were run before the mask covered the words of the area as
 the model and the results rephrase them, so the town's name appeared in that
 output. The mask now hides every word of the area of four letters or more,
 including inside URL slugs, and the state's two-letter code.
+
+## 2026-10-14 — Price check: Lightning against Ultra, three real checks each
+
+Same guide, same tools, same night (a Wednesday with nothing big on), run
+back to back from the command line with console alerts.
+
+| | Nemotron 3.5 Lightning | Nemotron 3 Ultra |
+| --- | --- | --- |
+| Checks finished clean, no reminder | 3 of 3 | 2 of 3 |
+| Wrong or unknown tool calls | 0 | 2 (an invented `search_web`, a repeated `keep_base`) |
+| Decisions | base, base, busy | base, base, base |
+| Searches per check | 3, 3, 3 | 3, 2, 2 |
+| Model calls per check | 6, 6, 6 | 10, 5, 5 |
+| Latency per call | 0.5 to 1.4 s, 0.7 to 0.8 s on average | 0.8 to 2.0 s, 1.2 to 1.4 s on average |
+| Reasoning tokens per call | 0 | 31 to 382 |
+
+**Tool discipline.** Lightning did exactly what the rules say every time:
+searches, one decision, one owner message with the price, one closing
+sentence, no report. Ultra reasoned more and slipped once in three: after
+deciding it called a tool it does not have, repeated its decision, and needed
+the reminder before it sent the owner the message.
+
+**Judgment.** The two differed on one night: both found a monthly sports-card
+show at a lodge in the town on the date. Lightning called that "busy" (a
+notable local event likely to draw visitors) and raised the price to $8.00
+an hour with the Instagram post as the source; Ultra saw the same post and
+kept the base price ("small local events, nothing likely to fill street
+parking"). Code accepted Lightning's decision because it met the rules: a
+real link from this check and a filled-in event and reason. Whether a card
+show fills a street is the owner's call, and the guide was not changed.
+
+**Default.** Lightning is now the default price model, because the round's
+rule was reliability with the tools, and it was perfect where Ultra needed a
+reminder. SPOTTER_PRICE_MODEL=nvidia/Nemotron-3-Ultra-550b-a55b brings back
+the more cautious judge. Tavily's usage endpoint caught up this time: it
+reported 34 credits used on the key after the first two Lightning checks,
+then lagged again.

@@ -3,9 +3,12 @@
     python -m spotter.price [--alerts console|telegram] [--expect PLATE]
 
 The owner sets three hourly prices (SPOTTER_RATE_BASE, SPOTTER_RATE_BUSY,
-SPOTTER_RATE_PEAK). Once a day, or on "/price" texted to the bot, Nemotron
-Ultra searches for events near the lot with Tavily (search_events, at most
-three searches per check), then ends with exactly one decision:
+SPOTTER_RATE_PEAK). Once a day, or on "/price" texted to the bot, the price
+model (SPOTTER_PRICE_MODEL: Nemotron 3.5 Lightning by default, which followed
+the tool rules in every check; Nemotron 3 Ultra judged more cautiously but
+needed reminders) searches for events near the lot with Tavily
+(search_events, at most three searches per check), then ends with exactly one
+decision:
 
 - set_demand(level, event, reason, source_url), level busy or peak. Code
   accepts it only if source_url came back from a search in this check and
@@ -36,6 +39,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from spotter import services
 from spotter.alerts import Alert, Alerts, TelegramSetupError, make_alerts
 from spotter.attendant import ATTEMPTS, BASE_URL, reasoning_tokens, usage_line
 from spotter.config import Settings
@@ -46,7 +50,7 @@ from spotter.tools import dollars
 from spotter.words import WordBook, clock_words, date_words
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PRICE_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"
+PRICE_MODEL = "nvidia/Nemotron-3_5-Lightning"  # the default; SPOTTER_PRICE_MODEL overrides
 TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_USAGE_URL = "https://api.tavily.com/usage"
 MAX_SEARCHES = 3
@@ -155,7 +159,9 @@ class TavilySearch:
         return {"Authorization": f"Bearer {self._key}"}
 
     def search(self, query: str) -> list[dict]:
+        started = time.perf_counter()
         reply = self._post(TAVILY_URL, {"query": query, "search_depth": "basic", "max_results": MAX_RESULTS, "include_answer": False}, self._headers())
+        services.note(services.TAVILY, time.perf_counter() - started)
         results = []
         for item in reply.get("results") or []:
             results.append(
@@ -451,6 +457,7 @@ class PriceAgent:
                 self.masker.print(f"MODEL call failed (attempt {attempt} of {ATTEMPTS}): {self._safe(err)}")
                 continue
             latency = time.perf_counter() - start
+            services.note(services.model_service(self.model), latency)
             usage = body.get("usage") or {}
             self.stats.model_calls += 1
             self.stats.latencies.append(latency)
@@ -536,7 +543,7 @@ def make_price_agent(client: OpenAI, db: Database, alerts: Alerts, masker: Maske
     if not settings.lot_area:
         raise ValueError("SPOTTER_LOT_AREA is missing from .env")
     masker.hide(settings.lot_area, "<lot area>")
-    return PriceAgent(client, db, alerts, masker, settings, TavilySearch(key))
+    return PriceAgent(client, db, alerts, masker, settings, TavilySearch(key), model=settings.price_model)
 
 
 def main() -> int:
@@ -549,9 +556,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m spotter.price", description="Decide tonight's price from a live web search.")
     parser.add_argument("--alerts", choices=("console", "telegram"))
     parser.add_argument("--expect", metavar="PLATE", help="your plate text, so output says MINE instead")
+    parser.add_argument("--model", metavar="MODEL", help="the model that decides (default SPOTTER_PRICE_MODEL)")
     args = parser.parse_args()
     try:
-        settings = config.load({"alerts": args.alerts})
+        settings = config.load({"alerts": args.alerts, "price_model": args.model})
     except ValueError as err:
         print(err, file=sys.stderr)
         return 2
@@ -573,7 +581,7 @@ def main() -> int:
         print(err, file=sys.stderr)
         return 2
     print(
-        f"alerts: {settings.alerts} | model: {PRICE_MODEL} | prices: base {dollars(settings.rate_base)}, busy {dollars(settings.rate_busy)},"
+        f"alerts: {settings.alerts} | model: {settings.price_model} | prices: base {dollars(settings.rate_base)}, busy {dollars(settings.rate_busy)},"
         f" peak {dollars(settings.rate_peak)} an hour | radius {settings.event_radius_miles:g} miles | at most {MAX_SEARCHES} searches"
     )
     before = agent.tavily.credits_used()
