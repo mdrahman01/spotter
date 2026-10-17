@@ -134,6 +134,71 @@ class OneCarOnePlateTest(unittest.TestCase):
         self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "ABC123")])
         self.assertEqual(rule.merged, 0)
 
+    def test_a_far_misread_never_seen_beside_the_present_plate_is_the_same_car(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)  # MAYR473 present
+        # the reader then returns a three-edit misread in frames where the real text is not read
+        events = []
+        for i in range(8):
+            events += rule.update(3 + i * 0.5, {"AXR477"})
+        self.assertEqual(events, [])  # no second car
+        self.assertEqual(set(rule.present), {"MAYR473"})
+        self.assertEqual(rule.present["MAYR473"].last_seen, 6.5)  # those reads were sightings of the car
+        self.assertEqual(rule.merged, 8)  # five at the judgement, then every later read of the alias
+        self.assertEqual(rule._recent, {})
+        self.assertEqual(rule.resolve({"AXR477"}, count=False), {"MAYR473"})
+        gone = rule.update(11, set())
+        self.assertEqual([e.type for e in gone], ["LEFT"])
+        self.assertEqual(rule._aliases, {})  # the alias goes with the car
+
+    def test_a_second_plate_seen_beside_the_first_arrives(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)
+        events = []
+        for i in range(5):
+            events += rule.update(3 + i * 0.5, {"MAYR473", "ABC123"})  # two plates in the same frames: two cars
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "ABC123")])
+        self.assertEqual(rule.merged, 0)
+        # a third text read on its own while both are present is a misread of the nearest one
+        for i in range(5):
+            events += rule.update(6 + i * 0.5, {"ABC128"})
+        self.assertEqual(len(events), 1)
+        self.assertEqual(rule.present["ABC123"].last_seen, 8.0)
+
+    def test_a_near_text_read_beside_the_present_plate_is_a_second_car(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)
+        events = []
+        for i in range(5):
+            events += rule.update(3 + i * 0.5, {"MAYR473", "AXR477"})  # three edits apart, but read in the same frames
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "AXR477")])
+        self.assertEqual(rule.merged, 0)
+        self.assertEqual(set(rule.present), {"MAYR473", "AXR477"})
+
+    def test_a_near_text_read_beside_the_present_plate_once_then_alone_still_arrives(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)
+        events = rule.update(3, {"MAYR473", "AXR477"})  # once in the same frame as the present plate
+        for i in range(1, 5):
+            events += rule.update(3 + i * 0.5, {"AXR477"})
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "AXR477")])
+        self.assertEqual(rule.merged, 0)
+
+    def test_a_completely_different_plate_arrives_even_if_never_seen_beside_the_first(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        self.arrived(rule)  # MAYR473 present; its plate is then hidden and a different car's plate is read alone
+        events = []
+        for i in range(5):
+            events += rule.update(3 + i * 0.5, {"ABC123"})
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "ABC123")])
+
+    def test_with_no_car_present_a_new_plate_arrives_as_before(self):
+        rule = ArriveLeaveRule(5, 3, 4)
+        events = []
+        for i in range(5):
+            events += rule.update(i * 0.5, {"AXR477"})
+        self.assertEqual([(e.type, e.plate) for e in events], [("ARRIVED", "AXR477")])
+
     def test_at_arrival_the_text_read_most_often_wins(self):
         rule = ArriveLeaveRule(5, 3, 4)
         events = []

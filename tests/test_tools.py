@@ -52,6 +52,16 @@ class Scene:
         return self.tools
 
 
+class OverlappingBookingsTest(unittest.TestCase):
+    def test_the_latest_starting_covering_booking_wins(self):
+        db = Database(":memory:")
+        long = db.add_booking(PLATE, "Dana Driver", T0 - timedelta(hours=1), T0 + timedelta(hours=11), RATE)
+        short = db.add_booking(PLATE, "Dana Driver", T0 - timedelta(minutes=1), T0 + timedelta(minutes=4), RATE)
+        self.assertEqual(db.booking_at(PLATE, T0)["id"], short)  # both cover T0: the one made for now wins
+        self.assertEqual(db.booking_at(PLATE, T0 + timedelta(minutes=10))["id"], long)  # the short one is over
+        self.assertIsNone(db.booking_at(PLATE, T0 + timedelta(hours=12)))
+
+
 class BillArithmeticTest(unittest.TestCase):
     def bill(self, seconds, rate=RATE, min_charge=0):
         return bill_cents(T0, T0 + timedelta(seconds=seconds), rate, min_charge)

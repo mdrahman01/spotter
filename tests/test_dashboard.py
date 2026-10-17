@@ -2,7 +2,10 @@
 LiveState fed by hand, and the server on an ephemeral port on localhost."""
 
 import json
+import os
+import signal
 import tempfile
+import time
 import unittest
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -13,8 +16,10 @@ import numpy as np
 
 from spotter import config, services
 from spotter.dashboard import Dashboard, LiveState
-from spotter.db import Database
+from spotter.db import Database, iso
 from spotter.light import ConsoleLight
+from spotter.run import log_run_started, log_run_stopped, source_kind
+from spotter.watch import StopRequest
 
 NOW = datetime(2026, 10, 14, 0, 30, tzinfo=timezone.utc)
 PLATE = "MAYR473"
@@ -89,7 +94,10 @@ class StateTest(unittest.TestCase):
         self.assertEqual(arrived["calls"][1]["result"]["light"], "green")
         self.assertEqual(arrived["closing"], "Started the stay, lit green, alerted the driver.")
         self.assertEqual(state["timeline"][0]["closing"], "Tonight: busy")
-        self.assertEqual(state["timeline"][1]["how"], "by code")
+        offline = state["timeline"][1]
+        self.assertEqual(offline["how"], "—")  # code's own row: nothing to finish, never "by code"
+        self.assertTrue(offline["detail"].startswith("no frames since "), offline["detail"])
+        self.assertEqual([c["tool"] for c in offline["calls"]], ["send_alert"])
         names = [s["name"] for s in state["services"]]
         self.assertEqual(names, list(services.SERVICES))
         lightning = state["services"][0]
@@ -113,6 +121,68 @@ class StateTest(unittest.TestCase):
         self.assertEqual(scene.dashboard.state()["unreadable"], "a dark van")
         self.assertEqual(scene.dashboard.state()["scene"], {"enabled": False, "report": None})
 
+    def test_two_runs_that_each_found_the_camera_down_read_as_two_runs(self):
+        """Last night's timeline showed CAMERA OFFLINE at 12:04 am and again at 12:05 am with no CAMERA
+        BACK between them. No row was doubled or missing: the first run was stopped while the camera
+        was down and the next run found it down too. The run rows now say so, and every one of these
+        code rows shows a dash in the Finished column."""
+        scene = self.scene
+        settings = config.load({}, env={"SPOTTER_SOURCE": "rtsp://user:pw@camera.test/stream", "SPOTTER_ALERTS": "telegram",
+                                        "SPOTTER_LIGHT": "kasa", "SPOTTER_SCENE": "cosmos"})
+        db = Database(scene.db_path)
+        first = NOW - timedelta(minutes=4)
+        log_run_started(db, settings, source_kind(settings, live=False), first)
+        offline = {"type": "CAMERA_OFFLINE", "time": iso(first + timedelta(seconds=30))}
+        db.log_action(offline, "camera", {"downtime_s": None}, {"by": "code"})
+        db.log_action(offline, "send_alert", {"to": "owner", "message": "Camera offline.", "by": "code"}, {"sent_to": "owner", "delivered": True, "by": "code"})
+        log_run_stopped(db, first + timedelta(seconds=90), first, "stopped by the user")
+        second = NOW - timedelta(minutes=2)
+        log_run_started(db, settings, source_kind(settings, live=False), second)
+        offline_again = {"type": "CAMERA_OFFLINE", "time": iso(second + timedelta(seconds=30))}
+        db.log_action(offline_again, "camera", {"downtime_s": None}, {"by": "code"})
+        back = {"type": "CAMERA_BACK", "time": iso(second + timedelta(seconds=100))}
+        db.log_action(back, "camera", {"downtime_s": 70.0}, {"by": "code"})
+        db.close()
+        rows = scene.dashboard.state()["timeline"]
+        self.assertEqual([r["kind"] for r in rows[:6]],
+                         ["CAMERA_BACK", "CAMERA_OFFLINE", "RUN_STARTED", "RUN_STOPPED", "CAMERA_OFFLINE", "RUN_STARTED"])
+        self.assertEqual({r["how"] for r in rows[:6]}, {"—"})
+        self.assertEqual(rows[5]["detail"], "camera, alerts telegram, light kasa, scene check on")
+        self.assertEqual(rows[3]["detail"], "stopped by the user after 1 minute 30 seconds")
+        self.assertEqual(rows[0]["detail"], "down 1 minute 10 seconds")
+        self.assertTrue(rows[1]["detail"].startswith("no frames since "))
+        self.assertEqual((rows[5]["plate"], rows[5]["calls"], rows[5]["closing"]), ("", [], ""))
+        self.assertNotIn("camera.test", json.dumps(rows))  # the run row names the kind of source, never its address
+
+
+class RunRowsTest(unittest.TestCase):
+    def test_the_source_kind_never_holds_the_address(self):
+        settings = config.load({}, env={"SPOTTER_SOURCE": "rtsp://user:pw@camera.test:554/stream1"})
+        self.assertEqual(source_kind(settings, live=False), "camera")
+        settings = config.load({}, env={"SPOTTER_SOURCE": "samples/clip.mov"})
+        self.assertEqual(source_kind(settings, live=False), "replay of clip.mov")
+        self.assertEqual(source_kind(settings, live=True), "file played live (clip.mov)")
+
+    def test_a_stop_signal_ends_the_run_the_way_ctrl_c_does(self):
+        stop = StopRequest()
+        stop.install()
+        try:
+            if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+                self.skipTest("not the main thread: no signal handler installed")
+            os.kill(os.getpid(), signal.SIGTERM)
+            for _ in range(100):
+                if stop.requested:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(stop.requested)  # the first signal asks for a stop after the event in hand
+            with self.assertRaises(KeyboardInterrupt):  # the second forces out
+                os.kill(os.getpid(), signal.SIGTERM)
+                for _ in range(100):
+                    time.sleep(0.01)
+        finally:
+            StopRequest.restore()
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+
 
 class ServerTest(unittest.TestCase):
     def setUp(self):
@@ -133,6 +203,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((status, content_type), (200, "text/html; charset=utf-8"))
         self.assertIn(b"/state.json", body)
         self.assertIn(b"Timeline", body)
+        self.assertIn(b"Waiting for the camera", body)  # the dark panel before the first frame
+        self.assertNotIn(b'src="/frame.jpg"', body)  # the frame is fetched off-screen: no broken image, ever
+        self.assertIn(b'id="frame-offline"', body)  # the label that sits over the last frame when the camera drops
         status, content_type, body = self.get("/state.json")
         self.assertEqual((status, content_type), (200, "application/json"))
         self.assertEqual(json.loads(body)["lot_name"], "Elm Street lot")

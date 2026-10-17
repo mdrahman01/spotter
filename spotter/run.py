@@ -14,6 +14,12 @@ A camera outage is reported here, from code, not by the model: one owner alert
 when frames stop and one when they return. At start the open stays from an
 earlier run are counted, and the light is set off if there are none.
 
+Each run also writes a RUN_STARTED and a RUN_STOPPED row to the action log, by
+code, so the dashboard's timeline shows where one run ended and the next began:
+two CAMERA_OFFLINE rows with no CAMERA_BACK between them are two runs that each
+found the camera down, not a doubled row. `kill PID` (SIGTERM) stops a run the
+way Ctrl-C does, after the event in hand, so the closing row gets written.
+
 Needs NEBIUS_API_KEY in .env; TELEGRAM_BOT_TOKEN when alerts go to Telegram;
 SPOTTER_LIGHT_HOST (and KASA_USERNAME/KASA_PASSWORD if the bulb asks) when the
 light is the Kasa bulb. With --expect PLATE everything printed, tool arguments
@@ -25,6 +31,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -37,6 +44,7 @@ from spotter.dispute import DisputeAgent, GoodwillRule
 from spotter.events import Event
 from spotter.inbox import TelegramInbox
 from spotter.light import LightError, make_light
+from spotter.live import is_stream
 from spotter.price import make_price_agent
 from spotter.timers import StayTimer
 from spotter.words import clock_words, duration_words
@@ -49,6 +57,35 @@ def parse_time(text: str) -> datetime:
     except ValueError:
         raise argparse.ArgumentTypeError(f"not an ISO 8601 time: {text!r}") from None
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+RUN_STARTED, RUN_STOPPED = "RUN_STARTED", "RUN_STOPPED"
+
+
+def source_kind(settings, live: bool) -> str:
+    """How the run watches, for the log: camera, file played live, or replay of NAME. Never the address."""
+    if is_stream(settings.source):
+        return "camera"
+    name = Path(settings.source).name
+    return f"file played live ({name})" if live else f"replay of {name}"
+
+
+def log_run_started(db: Database, settings, kind: str, when: datetime) -> None:
+    """The run's opening row, by code. The timeline shows it, so the owner can see that two
+    CAMERA_OFFLINE rows with no CAMERA_BACK between them belong to two runs."""
+    detail = f"{kind}, alerts {settings.alerts}, light {settings.light}" + (", scene check on" if settings.scene != "off" else "")
+    db.log_action(
+        {"type": RUN_STARTED, "time": iso(when)},
+        "run",
+        {"source": kind, "alerts": settings.alerts, "light": settings.light, "scene": settings.scene, "detail": detail},
+        {"by": "code"},
+    )
+
+
+def log_run_stopped(db: Database, when: datetime, started: datetime, how: str) -> None:
+    """The run's closing row, by code: how it ended and after how long."""
+    detail = f"{how} after {duration_words((when - started).total_seconds())}"
+    db.log_action({"type": RUN_STOPPED, "time": iso(when)}, "run", {"how": how, "detail": detail}, {"by": "code"})
 
 
 def main() -> int:
@@ -189,18 +226,28 @@ def main() -> int:
             {"sent_to": "owner", "delivered": delivery.delivered, "delivery_error": delivery.error, "by": "code"},
         )
 
+    started_at = datetime.now(timezone.utc)
+    log_run_started(db, settings, source_kind(settings, args.live), started_at)
+    how = "the source ended"
     try:
         summary = watch.run(
             settings, masker, attendant.handle, timers, args.replay_base_time, live=args.live, on_camera=on_camera,
             live_state=live_state,
         )
+        if summary.stopped_by_user:
+            how = "stopped by the user"
         if dashboard is not None and settings.dashboard_hold_s > 0:
             print(f"dashboard: holding the page for {settings.dashboard_hold_s:g}s after the end", flush=True)
             time.sleep(settings.dashboard_hold_s)
     except (FileNotFoundError, RuntimeError) as err:
+        how = "stopped by an error"
         print(err, file=sys.stderr)
         return 2
     finally:
+        try:
+            log_run_stopped(db, datetime.now(timezone.utc), started_at, how)
+        except Exception as err:  # the closing row must never hide how the run itself ended
+            print(f"the run's closing row was not written: {type(err).__name__}: {err}", file=sys.stderr)
         if inbox is not None:
             inbox.stop()
         if dashboard is not None:

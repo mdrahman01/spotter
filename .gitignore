@@ -225,3 +225,6 @@ samples_out/
 
 # Watcher output: event log and snapshots (they show real plates)
 data/
+
+# macOS Finder metadata
+.DS_Store

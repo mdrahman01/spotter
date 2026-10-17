@@ -4,11 +4,13 @@
 
 The owner sets three hourly prices (SPOTTER_RATE_BASE, SPOTTER_RATE_BUSY,
 SPOTTER_RATE_PEAK). Once a day, or on "/price" texted to the bot, the price
-model (SPOTTER_PRICE_MODEL: Nemotron 3.5 Lightning by default, which followed
-the tool rules in every check; Nemotron 3 Ultra judged more cautiously but
-needed reminders) searches for events near the lot with Tavily
-(search_events, at most three searches per check), then ends with exactly one
-decision:
+model (SPOTTER_PRICE_MODEL: Nemotron 3 Ultra by default, the careful judge;
+Nemotron 3.5 Lightning followed the tool rules better, but a money decision
+wants the careful judge, and the finish check's reminder covers its slips)
+searches for events near the lot with Tavily (search_events, at most three
+searches per check), weighs what it finds against the owner's policy (an
+event counts only if it draws more cars than the streets near the lot can
+hold), then ends with exactly one decision:
 
 - set_demand(level, event, reason, source_url), level busy or peak. Code
   accepts it only if source_url came back from a search in this check and
@@ -50,7 +52,7 @@ from spotter.tools import dollars
 from spotter.words import WordBook, clock_words, date_words
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PRICE_MODEL = "nvidia/Nemotron-3_5-Lightning"  # the default; SPOTTER_PRICE_MODEL overrides
+PRICE_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"  # the careful judge, the default; SPOTTER_PRICE_MODEL overrides
 TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_USAGE_URL = "https://api.tavily.com/usage"
 MAX_SEARCHES = 3
@@ -72,16 +74,21 @@ Rules:
 2. peak: a stadium- or arena-scale event today within the radius. busy: a notable event today within the
    radius that is likely to fill street parking. Anything else, and whenever you are unsure (the result's
    date is not today, the venue is outside the radius, or the result is vague), means the base price.
-3. End the check with exactly one decision, made by calling a tool: set_demand(level, event, reason,
+3. The owner's policy: an event counts only if it draws more cars than the streets near the lot can
+   hold. A stadium or arena event is peak. A concert venue, festival, parade, college game or large
+   fair is busy. A show, sale, class or meeting at a hall, lodge, school or shop is not an event for
+   pricing. This policy narrows rule 2 and never widens it: the event must still be today and within
+   the radius, and doubt still means the base price.
+4. End the check with exactly one decision, made by calling a tool: set_demand(level, event, reason,
    source_url) with level busy or peak, where source_url is a url returned by a search in this check and
    event and reason are filled in; or keep_base(reason). Never write a report or ask a question instead
    of deciding: the only way a check ends is a call to set_demand or keep_base. Never name a dollar
    amount yourself: the decision's result gives tonight's price in words.
-4. Then call send_alert(message) once with one message for the owner: tonight's price and the level
+5. Then call send_alert(message) once with one message for the owner: tonight's price and the level
    exactly as the decision returned them; for busy or peak also the event with its venue and time as the
    search result states them, and the source link (the url). For the base price: that the price stays,
    and why.
-5. Reply with one short sentence listing what you did, and make no more tool calls.
+6. Reply with one short sentence listing what you did, and make no more tool calls.
 """
 
 CLEAN, AFTER_REMINDER, BY_CODE = "clean", "after a reminder", "completed by code"

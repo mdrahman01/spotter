@@ -1,14 +1,17 @@
 """Tests of the pricing agent with no network: scripted searches and a scripted model."""
 
 import json
+import os
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from spotter import config
 from spotter.alerts import ConsoleAlerts
 from spotter.db import Database
-from spotter.price import AFTER_REMINDER, BY_CODE, CLEAN, MAX_SEARCHES, PriceAgent, PriceToolbox, TavilySearch, price_until
+from spotter.price import AFTER_REMINDER, BY_CODE, CLEAN, MAX_SEARCHES, PRICE_MODEL, PRICE_PROMPT, PriceAgent, PriceToolbox, TavilySearch, make_price_agent, price_until
 from spotter.privacy import Masker
 from spotter.seed import tonight_rate
 from spotter.words import WordBook
@@ -241,6 +244,49 @@ class ToolboxTest(unittest.TestCase):
         self.assertIn("one argument", toolbox.call("send_alert", json.dumps({"level": "base", "price": "$5.00 an hour"}))["error"])
         toolbox.keep_base("nothing on")
         self.assertTrue(toolbox.call("send_alert", json.dumps({"message": "The price stays at $5.00 an hour."}))["delivered"])
+
+
+class GuideTest(unittest.TestCase):
+    def test_the_guide_carries_the_owners_policy_right_after_rule_2(self):
+        guide = " ".join(PRICE_PROMPT.split())  # on one line, so wrapping cannot split a phrase
+        self.assertIn("an event counts only if it draws more cars than the streets near the lot can hold", guide)
+        self.assertIn("A stadium or arena event is peak", guide)
+        self.assertIn("A concert venue, festival, parade, college game or large fair is busy", guide)
+        self.assertIn("A show, sale, class or meeting at a hall, lodge, school or shop is not an event for pricing", guide)
+        self.assertEqual(re.findall(r"(?m)^(\d+)\. ", PRICE_PROMPT), ["1", "2", "3", "4", "5", "6"])
+        self.assertTrue(guide.index("2. peak:") < guide.index("3. The owner's policy") < guide.index("4. End the check"))
+        # the policy narrows rule 2 and leaves the old rules standing
+        self.assertIn("never widens it", guide)
+        self.assertIn("whenever you are unsure", guide)
+        self.assertIn("means the base price", guide)
+        self.assertIn("exactly one decision", guide)
+
+
+class ModelChoiceTest(unittest.TestCase):
+    ULTRA = "nvidia/Nemotron-3-Ultra-550b-a55b"
+    LIGHTNING = "nvidia/Nemotron-3_5-Lightning"
+
+    def test_the_careful_judge_is_the_default_price_model(self):
+        self.assertEqual(PRICE_MODEL, self.ULTRA)
+        self.assertEqual(config.Settings().price_model, self.ULTRA)
+        self.assertEqual(config.load({}, env={}).price_model, self.ULTRA)
+        self.assertEqual(Scene([]).agent.model, self.ULTRA)  # PriceAgent's own default
+        help_text = config.Settings.__dataclass_fields__["price_model"].metadata["help"]
+        self.assertIn("careful judge", help_text)
+        self.assertIn("SPOTTER_PRICE_MODEL", help_text)
+
+    def test_spotter_price_model_still_switches_the_model(self):
+        self.assertEqual(config.load({}, env={"SPOTTER_PRICE_MODEL": self.LIGHTNING}).price_model, self.LIGHTNING)
+        self.assertEqual(config.load({"price_model": "other/model"}, env={"SPOTTER_PRICE_MODEL": self.LIGHTNING}).price_model, "other/model")  # --model wins
+        for env_model, expected in ((None, self.ULTRA), (self.LIGHTNING, self.LIGHTNING)):
+            env = {"SPOTTER_LOT_AREA": "Elm Street, Springfield"}
+            if env_model:
+                env["SPOTTER_PRICE_MODEL"] = env_model
+            masker = Masker(None)
+            masker.print = quiet
+            with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}):
+                agent = make_price_agent(FakeModel([]), Database(":memory:"), ConsoleAlerts(say=quiet), masker, config.load({}, env=env))
+            self.assertEqual(agent.model, expected)
 
 
 if __name__ == "__main__":

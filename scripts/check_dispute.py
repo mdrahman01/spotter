@@ -1,6 +1,6 @@
 """Check how the dispute worker handled the last driver message and print PASS or FAIL.
 
-    .venv/bin/python scripts/check_dispute.py a|b|c
+    .venv/bin/python scripts/check_dispute.py a|b|c [--db PATH]
 
 Reads data/spotter.db: the most recent DISPUTE event in action_log and the
 stay it was about. Only delivered alerts count. Prints no plate text and no
@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from check_attendant import load_json, time_tokens  # noqa: E402
+from check_attendant import load_json, option, time_tokens  # noqa: E402
 from spotter.db import Database  # noqa: E402
 
 SCENARIOS = ("a", "b", "c")
@@ -44,11 +44,17 @@ def money_tokens(text: str) -> set[str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in SCENARIOS:
-        print("usage: check_dispute.py a|b|c", file=sys.stderr)
+    args = list(sys.argv[1:])
+    db_path = None
+    try:
+        db_path = option(args, "--db")
+    except ValueError:
+        args = []  # the usage line follows
+    if len(args) != 1 or args[0] not in SCENARIOS:
+        print("usage: check_dispute.py a|b|c [--db PATH]", file=sys.stderr)
         return 2
-    scenario = sys.argv[1]
-    db = Database()
+    scenario = args[0]
+    db = Database(db_path) if db_path else Database()
     actions = db.actions()
     disputes = [a for a in actions if json.loads(a["event"]).get("type") == "DISPUTE"]
     if not disputes:

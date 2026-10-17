@@ -533,3 +533,90 @@ reminder. SPOTTER_PRICE_MODEL=nvidia/Nemotron-3-Ultra-550b-a55b brings back
 the more cautious judge. Tavily's usage endpoint caught up this time: it
 reported 34 credits used on the key after the first two Lightning checks,
 then lagged again.
+
+## 2026-10-16 — Rehearsal day: every scene on the real camera, Cosmos Reason back on a Nebius endpoint
+
+All seven scenes of the video ran in order on the real camera at dusk, with
+the bulb, the prop plates, Telegram, the Cosmos scene check and the dashboard,
+and each scene's check passed when run right after it. These notes are about
+the Nebius and NVIDIA tools; the day's code changes are in the commit.
+
+**Cosmos Reason on Serverless AI, fourth time.** The endpoint (gpu-l40s-a,
+1gpu-8vcpu-32gb, $1.59 an hour, vLLM 0.18.0) was created at 21:13:39Z and
+served its first look 573 s later: create 7 s, PROVISIONING 53 s, STARTING
+42 s, IMAGE_PULLING 167 s, STARTING again 10 s, then 294 s from RUNNING to the
+model loaded. It was deleted at 22:05:59Z after 52.4 minutes, about $1.39,
+and the listing afterwards showed none; the 3-hour watchdog ran alongside and
+was stopped. Across the three run segments the scene check made 112 looks:
+median 1.8 s, the worst 9.4, 2.3 and 13.3 s per segment, one look unavailable
+(a timeout) and none wrong. It confirmed every departure early (LEFT 12 to
+13 s after the last read, against 30 s unread without it), held the stay
+through 90 s of the plate being covered, described the vehicle (make, colour
+and body) after three looks when its plate could not be read, and said when
+the spot was clear. One UNREADABLE_VEHICLE fired before an ARRIVED in scene c:
+at dusk with headlights on, the plate went unread for 20 s while the car was
+already in the spot; not wrong, but noisy.
+
+**Nemotron 3.5 Lightning as the attendant.** 17 live events (six ARRIVED, six
+LEFT, one ENDING_SOON, one OVERSTAY, two UNREADABLE_VEHICLE, one SPOT_CLEAR):
+all 17 finished clean, no reminder, nothing completed by code, 22 photos
+delivered. First read to the light: 2.2 to 5.6 s when the bulb answered
+quickly; the bulb itself was slow all evening (1.7 to 9.6 s a command, its
+weak Wi-Fi, not the model). Last read to the light off: 13 to 15 s with the
+scene check confirming, the bill and both messages within 3 s of that.
+
+**Nemotron 3 Ultra on disputes.** Two live disputes over Telegram: the fee
+kept, with the two photos captioned by code, then waived to $1.00 under the
+goodwill rule, no photos, both parties told. Its second draft stated the
+decision twice; code refused it and the resend said it once, as designed.
+
+**The price check, both models, with the owner's policy in the guide.** The
+policy (an event counts only if it draws more cars than the streets near the
+lot can hold; a stadium or arena event is peak; a concert venue, festival,
+parade, college game or large fair is busy; a show, sale, class or meeting at
+a hall, lodge, school or shop is not an event for pricing) is rule 3 of the
+guide, and Ultra is the default judge again: a money decision wants the
+careful one, and the finish check covers its slips. One real check with each,
+back to back at 12:10 am on a Saturday with nothing on, console alerts:
+
+| | Nemotron 3 Ultra | Nemotron 3.5 Lightning |
+| --- | --- | --- |
+| Decision | base, $5.00 an hour until 6:00 am | base, $5.00 an hour until 6:00 am |
+| Searches | 3 | 3 |
+| Model calls | 9 | 6 |
+| Tool calls refused by code | 3 (keep_base twice more after deciding; one owner message without the price) | 0 |
+| Finish | clean | clean |
+| Latency per call | 0.9 to 3.6 s, 2.0 s on average | 0.4 to 0.7 s, 0.5 s on average |
+| Reasoning tokens per call | 52 to 759 | 0 |
+
+Ultra's reason sorted the findings into the policy's categories (hall
+concerts, nightclub shows and township festivals are not stadium or arena
+scale; the big events it found were too far away); Lightning's said "none
+qualifying as peak or busy under the policy". The live check in scene e
+(Lightning, over Telegram) tried set_demand with the level "base" once, which
+code refused, then called keep_base; three searches, base. Tavily's usage
+endpoint reported 53 credits before and after both checks, lagging again, so
+searches are counted from the calls.
+
+**Plate reader notes.** The printed prop plate read 0 of 20 at first: about
+70 px wide in the frame where the real plate measures 96 to 115 px, and the
+low sun flattened the contrast. Three feet closer it read 20 of 20 at 113 to
+123 px. In scene b the reader also returned AXR477 for MAYR 473 for a few
+frames (three edits apart), which arrived as a second car and told the owner
+twice; the one-car-one-plate rule now treats a text up to three edits from a
+present plate as a misread when it is never read in the same frame as that
+plate, and keeps the alias for the stay. The trade-off is documented in
+events.py: a different car whose plate is within three edits of the present
+one, read only while that plate is unreadable, would be merged; the scene
+check is the safeguard.
+
+**Lessons about the setup, not the models.** A detached run on a laptop with
+the lid closed sleeps with the laptop: the previous night's log showed retry
+gaps of 15 to 30 minutes and "down 16 hours 9 minutes", which were the Mac
+asleep, not the camera or a stall. The run now holds caffeinate -i -s; the
+lid still has to stay open. The two CAMERA OFFLINE rows at 12:04 and 12:05 am
+with no CAMERA BACK between them were two runs that each found the camera
+down (the first was stopped while it was down); the run now writes
+RUN_STARTED and RUN_STOPPED rows, the timeline shows them with a dash in the
+Finished column, and a stop signal ends a run the way Ctrl-C does, so the
+closing row gets written.

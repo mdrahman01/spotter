@@ -45,7 +45,16 @@
   section.card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; min-width: 0; }
   h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
   #camera { grid-area: camera; }
-  #camera img { width: 100%; height: auto; display: block; border-radius: 10px; background: #000; aspect-ratio: 16 / 9; object-fit: contain; }
+  #camera .frame-box { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; overflow: hidden; }
+  #camera .frame-box img { display: none; width: 100%; height: 100%; object-fit: contain; }
+  #camera .frame-box.has-frame img { display: block; }
+  #camera .frame-box.offline img { filter: grayscale(0.7) brightness(0.6); }
+  #camera .waiting { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #0b0d12; color: var(--muted); font-size: 24px; }
+  #camera .frame-box.has-frame .waiting { display: none; }
+  #camera .offline-label { display: none; position: absolute; top: 14px; left: 14px; padding: 6px 16px; border-radius: 999px;
+    background: rgba(255, 92, 92, 0.92); color: #fff; font-size: 16px; font-weight: 700; letter-spacing: 0.04em; }
+  #camera .frame-box.offline.has-frame .offline-label { display: inline-block; }
   #camera .under { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 12px; }
   #stay { grid-area: stay; display: flex; flex-direction: column; }
   .plate { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 40px; font-weight: 700; letter-spacing: 0.08em;
@@ -119,7 +128,11 @@
 
   <section class="card" id="camera">
     <h2>Live frame</h2>
-    <img id="frame" alt="camera frame" src="/frame.jpg">
+    <div class="frame-box" id="frame-box">
+      <img id="frame" alt="camera frame">
+      <div class="waiting" id="frame-waiting">Waiting for the camera</div>
+      <div class="offline-label" id="frame-offline">offline</div>
+    </div>
     <div class="under">
       <div class="stat"><div class="label">Last plate read</div><div class="value" id="last-read">—</div></div>
       <div class="stat"><div class="label">Scene check</div><div class="value" id="scene" style="font-size:19px;font-weight:500">off</div></div>
@@ -230,6 +243,8 @@
     else if (cam.state === "live") text = "live";
     pill.className = "pill " + cam.state;
     $("camera-text").textContent = text;
+    $("frame-box").classList.toggle("offline", cam.state === "offline");  // the last frame stays, under the label
+    $("frame-offline").textContent = cam.state === "offline" && cam.for ? `offline for ${cam.for}` : "offline";
     $("last-read").textContent = s.last_read ? `${s.last_read.plate}  ·  ${s.last_read.at}` : "none yet";
     if (!s.scene.enabled) $("scene").textContent = "off";
     else if (!s.scene.report) $("scene").textContent = "on, no look yet";
@@ -251,7 +266,13 @@
       if (r.ok) render(await r.json());
     } catch (e) { /* the worker may be busy; try again */ }
   }
-  function refreshFrame() { $("frame").src = "/frame.jpg?t=" + Date.now(); }
+  // The frame is fetched off-screen and swapped in only once it has loaded: before the camera has sent
+  // anything (the server answers 404) the panel says "Waiting for the camera", never a broken image.
+  function refreshFrame() {
+    const next = new Image();
+    next.onload = () => { $("frame").src = next.src; $("frame-box").classList.add("has-frame"); };
+    next.src = "/frame.jpg?t=" + Date.now();
+  }
   poll(); refreshFrame();
   setInterval(poll, 2000);
   setInterval(refreshFrame, 2000);

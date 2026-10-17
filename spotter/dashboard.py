@@ -5,7 +5,9 @@
 GET /            the page (spotter/dashboard.html, styles and script inside)
 GET /state.json  everything the page shows, polled every 2 s
 GET /frame.jpg   the newest camera frame, 960 px wide with the watch zone drawn,
-                 re-encoded at most once a second
+                 re-encoded at most once a second; 404 until the first frame. The page
+                 shows "Waiting for the camera" until then, and when the camera drops it
+                 keeps the last frame under an "offline" label.
 
 The page can change nothing: there are no other routes. It works during a
 replay too. The watcher updates a LiveState (frame, last read, camera state,
@@ -35,7 +37,8 @@ PAGE = Path(__file__).resolve().parent / "dashboard.html"
 FRAME_WIDTH = 960
 FRAME_EVERY_S = 1.0
 TIMELINE_ROWS = 60
-QUIET_TOOLS = ("words", "finish", "reminder", "final", "model", "dispute", "camera", "photo")
+QUIET_TOOLS = ("words", "finish", "reminder", "final", "model", "dispute", "camera", "photo", "run")
+CODE_ROWS = ("CAMERA_OFFLINE", "CAMERA_BACK", "RUN_STARTED", "RUN_STOPPED")  # code's own rows: nothing to finish
 
 
 @dataclass
@@ -176,7 +179,8 @@ class Dashboard:
         for group in groups[-TIMELINE_ROWS:]:
             event, actions = group["event"], group["rows"]
             kind = event.get("type", "?")
-            how, closing, calls = None, None, []
+            when = parse(event["time"]) if event.get("time") else now
+            how, closing, calls, detail = None, None, [], ""
             for action in actions:
                 tool = action["tool"]
                 result = _load(action["result"])
@@ -185,6 +189,11 @@ class Dashboard:
                     how = arguments.get("how")
                 elif tool == "final":
                     closing = result.get("text")
+                elif tool == "run":  # RUN_STARTED / RUN_STOPPED: the words code wrote for the row
+                    detail = arguments.get("detail") or ""
+                elif tool == "camera":
+                    down = arguments.get("downtime_s")
+                    detail = f"down {duration_words(down)}" if down else f"no frames since {clock_words(when, now)}"
                 elif tool in QUIET_TOOLS:
                     if tool == "dispute":
                         closing = closing or f"Message: {arguments.get('text', '')!r}"
@@ -197,9 +206,8 @@ class Dashboard:
                         "result": _brief(result),
                         "error": result.get("error"),
                     })
-            when = parse(event["time"]) if event.get("time") else now
-            if kind in ("CAMERA_OFFLINE", "CAMERA_BACK"):
-                how = "by code"
+            if kind in CODE_ROWS:
+                how = "—"  # the page shows a dash: nothing for the attendant to finish, never "by code"
             if kind == "PRICE_CHECK":
                 finish = next((_load(a["result"]) for a in actions if a["tool"] == "finish"), {})
                 level = finish.get("level")
@@ -212,7 +220,7 @@ class Dashboard:
                 "how": how or "",
                 "calls": calls,
                 "closing": closing or "",
-                "detail": event.get("what") or ("" if kind != "SPOT_CLEAR" else event.get("stayed_for") or ""),
+                "detail": detail or event.get("what") or (event.get("stayed_for") or "" if kind == "SPOT_CLEAR" else ""),
             })
         rows.reverse()
         return rows

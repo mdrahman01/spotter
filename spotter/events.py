@@ -7,8 +7,12 @@ for a file, wall-clock time for a live stream) and must never go backwards.
 
 One car, one plate: while a plate is present, a read within two edits of it
 is the same car misread and counts as a sighting of the present plate, never
-as a new car. At arrival the text that reached the rule is compared with the
-near-duplicates read in the same window and the text read most often wins.
+as a new car; a text three edits away is the same car too unless it was read
+in the same frame as the present plate at least once in its window (two cars
+show two plates at once; one plate misread never shows both). Once judged a
+misread, a text keeps counting as that plate while the plate is present. At
+arrival the text that reached the rule is compared with the near-duplicates
+read in the same window and the text read most often wins.
 """
 
 from collections import deque
@@ -19,6 +23,7 @@ from datetime import datetime
 # Allowance for floating-point error when comparing times, e.g. 26.0 - 22.0 with 4.
 EPSILON = 1e-6
 MISREAD_EDITS = 2  # a read this close to a present plate is that plate, misread
+FAR_MISREAD_EDITS = 3  # ... and this close, if it was never read beside the present plate
 
 
 def edit_distance(a: str, b: str, limit: int = MISREAD_EDITS) -> int:
@@ -81,12 +86,19 @@ class ArriveLeaveRule:
         self.held: set[str] = set()
         # Read times of plates that have not arrived, newest last.
         self._recent: dict[str, deque[float]] = {}
+        # Frames in which a not-yet-arrived text was read together with a present plate.
+        self._with_present: dict[str, int] = {}
+        # Texts judged to be misreads of a present plate, and that plate.
+        self._aliases: dict[str, str] = {}
         self.merged = 0  # reads of a near-duplicate counted as the plate they were misread from
 
     def same_car(self, text: str) -> str | None:
-        """The present plate this read is a misread of (within two edits), if any."""
+        """The present plate this read is a misread of (within two edits, or judged one before), if any."""
         if text in self.present:
             return text
+        alias = self._aliases.get(text)
+        if alias in self.present:
+            return alias
         nearest = min(
             ((edit_distance(text, present), present) for present in self.present),
             default=(MISREAD_EDITS + 1, None),
@@ -115,6 +127,7 @@ class ArriveLeaveRule:
         """Declare the plate gone now, as the scene confirmed; its last read stays the departure time."""
         stay = self.present.pop(plate, None)
         self.held.discard(plate)
+        self._forget_aliases(plate)
         if stay is None:
             return None
         return _event("LEFT", plate, now, stay, note)
@@ -126,7 +139,9 @@ class ArriveLeaveRule:
         that departures are noticed. A plate read twice in one frame counts once.
         """
         events = []
-        for plate in sorted(self.resolve(plates)):  # the rule counts what it merges
+        resolved = self.resolve(plates)  # the rule counts what it merges
+        present_read = any(p in self.present for p in resolved)
+        for plate in sorted(resolved):
             stay = self.present.get(plate)
             if stay:
                 stay.last_seen = now
@@ -136,7 +151,15 @@ class ArriveLeaveRule:
             times.append(now)
             while now - times[0] > self.arrive_window_s + EPSILON:
                 times.popleft()
+            if present_read:
+                self._with_present[plate] = self._with_present.get(plate, 0) + 1
             if len(times) >= self.arrive_reads:
+                nearest = min(self.present, key=lambda p: edit_distance(plate, p, limit=FAR_MISREAD_EDITS), default=None)
+                if (nearest is not None and not self._with_present.get(plate)
+                        and edit_distance(plate, nearest, limit=FAR_MISREAD_EDITS) <= FAR_MISREAD_EDITS):
+                    # Close to a present plate and never seen beside it: that car misread, not a second car.
+                    self._misread_of_present(plate, nearest, now, len(times))
+                    continue
                 plate, times = self._most_read_variant(plate, now)
                 # A new arrival means a held car has gone: it leaves first.
                 for held in sorted(self.held):
@@ -153,13 +176,29 @@ class ArriveLeaveRule:
                 continue
             if now - stay.last_seen >= self.leave_after_s - EPSILON:
                 del self.present[plate]
+                self._forget_aliases(plate)
                 events.append(_event("LEFT", plate, now, stay))
 
         # Forget reads that can no longer be part of any arrival window.
         stale = [p for p, t in self._recent.items() if now - t[-1] > self.arrive_window_s + EPSILON]
         for plate in stale:
             del self._recent[plate]
+            self._with_present.pop(plate, None)
         return events
+
+    def _misread_of_present(self, text: str, plate: str, now: float, reads: int) -> None:
+        """Count the text's reads as sightings of `plate`, and keep treating the text as that plate."""
+        stay = self.present[plate]
+        stay.last_seen = now
+        stay.reads += reads
+        self.merged += reads
+        self._aliases[text] = plate
+        del self._recent[text]
+        self._with_present.pop(text, None)
+
+    def _forget_aliases(self, plate: str) -> None:
+        for text in [t for t, p in self._aliases.items() if p == plate]:
+            del self._aliases[text]
 
 
     def _most_read_variant(self, plate: str, now: float) -> tuple[str, deque[float]]:
@@ -176,6 +215,7 @@ class ArriveLeaveRule:
         self.merged += sum(len(times) for text, times in variants.items() if text != chosen)
         for text in variants:
             del self._recent[text]
+            self._with_present.pop(text, None)
         return chosen, deque(pooled)
 
 

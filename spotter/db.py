@@ -121,10 +121,11 @@ class Database:
         return self._one("SELECT * FROM bookings WHERE id = ?", booking_id)
 
     def booking_at(self, plate: str, moment: datetime) -> dict | None:
-        """The booking for the plate whose window covers `moment`, if any."""
+        """The booking for the plate whose window covers `moment`, if any; when two overlap, the one
+        that starts latest (the booking made most recently for this time) wins."""
         return self._one(
             "SELECT * FROM bookings WHERE plate = ? AND starts_at <= ? AND ? < ends_at"
-            " ORDER BY starts_at LIMIT 1",
+            " ORDER BY starts_at DESC, id DESC LIMIT 1",
             plate, iso(moment), iso(moment),
         )
 

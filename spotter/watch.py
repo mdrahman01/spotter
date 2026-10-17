@@ -109,7 +109,8 @@ class Summary:
 
 
 class StopRequest:
-    """Set by the first Ctrl-C; the run ends after the event in hand. A second Ctrl-C forces out."""
+    """Set by the first Ctrl-C, or the first SIGTERM as `kill PID` sends; the run ends after the
+    event in hand and writes its closing rows. A second signal forces out."""
 
     def __init__(self) -> None:
         self.requested = False
@@ -119,10 +120,12 @@ class StopRequest:
             if self.requested:
                 raise KeyboardInterrupt
             self.requested = True
-            print("Ctrl-C: stopping after the event in hand (press again to force)", flush=True)
+            name = "Ctrl-C" if signum == signal.SIGINT else "stop signal"
+            print(f"{name}: stopping after the event in hand (send again to force)", flush=True)
 
         try:
             signal.signal(signal.SIGINT, handler)
+            signal.signal(signal.SIGTERM, handler)
         except ValueError:  # not the main thread
             pass
 
@@ -130,6 +133,7 @@ class StopRequest:
     def restore() -> None:
         try:
             signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
         except ValueError:
             pass
 
@@ -160,10 +164,11 @@ def append_record(record: dict) -> None:
 
 
 def keep_awake() -> subprocess.Popen | None:
-    """On macOS, stop the machine idle-sleeping while this process runs."""
+    """On macOS, stop the machine sleeping while this process runs: neither idle sleep (-i) nor
+    system sleep on mains power (-s). Closing a laptop's lid still sleeps it; keep the lid open."""
     if sys.platform != "darwin" or not shutil.which("caffeinate"):
         return None
-    return subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())], stdin=subprocess.DEVNULL)
+    return subprocess.Popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())], stdin=subprocess.DEVNULL)
 
 
 def test_drop_reads() -> Callable[[float], bool]:

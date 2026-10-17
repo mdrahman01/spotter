@@ -112,7 +112,7 @@ class Settings:
     lot_area: str = field(default="", metadata={"help": "where the lot is, for the event search (never printed)"})
     event_radius_miles: float = field(default=5, metadata={"help": "events within this many miles count"})
     price_check_at: str = field(default="", metadata={"help": "local time HH:MM of the daily price check (empty: none)"})
-    price_model: str = field(default="nvidia/Nemotron-3_5-Lightning", metadata={"help": "the model that decides tonight's price (Lightning followed the tool rules best; Ultra is the cautious alternative)"})
+    price_model: str = field(default="nvidia/Nemotron-3-Ultra-550b-a55b", metadata={"help": "the model that decides tonight's price: Nemotron 3 Ultra, the careful judge; SPOTTER_PRICE_MODEL still switches it (Lightning followed the tool rules better, but a money decision wants the careful judge)"})
     dashboard: bool = field(default=False, metadata={"help": "serve the owner's page at http://localhost:<dashboard_port> (on/off)"})
     dashboard_port: int = field(default=8000, metadata={"help": "the dashboard's port"})
     dashboard_hold_s: float = field(default=0, metadata={"help": "keep serving the dashboard this long after a replay ends"})

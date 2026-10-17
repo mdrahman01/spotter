@@ -1,6 +1,11 @@
 """Check what the attendant did in one scenario and print PASS or FAIL.
 
-    .venv/bin/python scripts/check_attendant.py booked|unknown|overstay|unreadable
+    .venv/bin/python scripts/check_attendant.py booked|unknown|overstay|unreadable [--since ISO_TIME] [--db PATH]
+
+With --since only the events and stays from that time on are checked (a time
+without a zone is UTC), so one scene of a long live run can be checked on its
+own; --db checks a copy. The run's own rows (RUN_STARTED, RUN_STOPPED, camera
+outages) are noted and skipped.
 
 Reads data/spotter.db. For every event it works out the end state the rules
 require, the same facts the attendant's finish check uses, from the sessions
@@ -39,20 +44,20 @@ import json
 import re
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spotter import config  # noqa: E402
-from spotter.db import Database, parse  # noqa: E402
+from spotter.db import Database, iso, parse  # noqa: E402
 from spotter.timers import time_left_words  # noqa: E402
 from spotter.tools import dollars  # noqa: E402
 from spotter.words import duration_words  # noqa: E402
 
 SCENARIOS = ("booked", "unknown", "overstay", "unreadable")
 OVERSTAY_EVENTS = ["ARRIVED", "ENDING_SOON", "OVERSTAY", "LEFT"]
-CAMERA_EVENTS = ("CAMERA_OFFLINE", "CAMERA_BACK")
+CODE_EVENTS = ("CAMERA_OFFLINE", "CAMERA_BACK", "RUN_STARTED", "RUN_STOPPED")  # code's own rows, noted and skipped
 
 CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?\b", re.IGNORECASE)
 ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?")
@@ -81,20 +86,47 @@ def load_json(text: str):
         return {}
 
 
+def option(args: list[str], flag: str) -> str | None:
+    """Take `flag VALUE` out of args and return VALUE, or None when the flag is absent.
+    Raises ValueError when the flag is the last argument, so the caller prints the usage line."""
+    if flag not in args:
+        return None
+    i = args.index(flag)
+    if i + 1 >= len(args):
+        raise ValueError(f"{flag} needs a value")
+    value = args[i + 1]
+    del args[i:i + 2]
+    return value
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in SCENARIOS:
-        print("usage: check_attendant.py booked|unknown|overstay", file=sys.stderr)
+    args = [a for a in sys.argv[1:]]
+    since = db_path = None
+    try:
+        since, db_path = option(args, "--since"), option(args, "--db")
+    except ValueError:
+        args = []  # the usage line follows
+    if len(args) != 1 or args[0] not in SCENARIOS:
+        print("usage: check_attendant.py booked|unknown|overstay|unreadable [--since ISO_TIME] [--db PATH]", file=sys.stderr)
         return 2
-    scenario = sys.argv[1]
+    scenario = args[0]
     settings = config.load({})
     fee_text = dollars(settings.overstay_fee_cents)
-    db = Database()
+    db = Database(db_path) if db_path else Database()
     sessions = db.sessions()
+    if since:
+        moment = parse(since)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        since_iso = iso(moment)  # the stored form, whatever zone was typed, so the strings compare in time order
+        sessions = [s for s in sessions if s["arrived_at"] >= since_iso]
 
     # Group the action log into events, in order.
     groups: list[dict] = []
     for action in db.actions():
         event = json.loads(action["event"])
+        if since and (event.get("time") or "") < since_iso:
+            continue
         if not groups or groups[-1]["event"] != event:
             groups.append({"event": event, "rows": []})
         groups[-1]["rows"].append(action)
@@ -109,7 +141,7 @@ def main() -> int:
     for group in groups:
         event = group["event"]
         kind, at, plate = event["type"], parse(event["time"]), event.get("plate")
-        if kind in CAMERA_EVENTS:
+        if kind in CODE_EVENTS:
             notes.append(f"{kind} at {event['time']}")
             continue
         alerts, reminders, code_items, errors = [], 0, 0, []
@@ -282,7 +314,7 @@ def main() -> int:
         failures.append(f"an alert states a time or duration code did not supply: {entry}")
 
     # Scenario shape.
-    order = [group["event"]["type"] for group in groups]
+    order = [group["event"]["type"] for group in groups if group["event"]["type"] not in CODE_EVENTS]
     if scenario == "overstay":
         if order != OVERSTAY_EVENTS:
             failures.append(f"events {order} are not {OVERSTAY_EVENTS}")
