@@ -115,7 +115,7 @@ class EvalFramesTest(unittest.TestCase):
 
 class MaskSourceTest(unittest.TestCase):
     def test_credentials_are_hidden(self):
-        self.assertEqual(mask_source("rtsp://admin:s3cret@192.168.1.50:554/stream1"), "rtsp://***@192.168.1.50:554/stream1")
+        self.assertEqual(mask_source("rtsp://user:password@192.168.1.50:554/stream1"), "rtsp://***@192.168.1.50:554/stream1")
         self.assertEqual(mask_source("rtsp://192.168.1.50/stream1?token=abc"), "rtsp://192.168.1.50/stream1")
         self.assertEqual(mask_source("samples/clip.mov"), "samples/clip.mov")
 
@@ -164,7 +164,7 @@ class FrameSourceTest(unittest.TestCase):
             source.stop()
 
     def test_a_missing_file_keeps_retrying_without_crashing(self):
-        source = FrameSource("/nonexistent/clip.mp4")
+        source = FrameSource("/nonexistent/clip.mp4", say=lambda line: None)  # the retry lines would clutter the test output
         source.start()
         time.sleep(1.3)
         self.assertGreaterEqual(source.failed_opens, 1)
