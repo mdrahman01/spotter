@@ -203,9 +203,11 @@ class Look:
 class SceneWorker:
     """Runs looks on a thread of its own and keeps only the newest request."""
 
-    def __init__(self, scene, say: Callable[[str], None] = print) -> None:
+    def __init__(self, scene, say: Callable[[str], None] = print, deadline_s: float | None = None) -> None:
         self.scene = scene
         self.say = say
+        # The scene's socket timeout plus a second: a call that never reaches its sockets is given up too.
+        self.deadline_s = deadline_s if deadline_s is not None else float(getattr(scene, "timeout_s", TIMEOUT_S)) + 1.0
         self._requests: queue.Queue = queue.Queue(maxsize=1)
         self._results: queue.Queue = queue.Queue()
         self._pending = 0
@@ -246,14 +248,11 @@ class SceneWorker:
             frame, now, tag = item
             try:
                 started = time.perf_counter()
-                if isinstance(self.scene, ScriptedScene):
-                    report = self.scene.look(frame, now)
-                else:
-                    report = self.scene.look(frame)
+                report, error = self._look(frame, now)
                 self.looks += 1
                 if report is None:
                     self.unavailable += 1
-                    self.say(f"SCENE look ({tag}) unavailable: {getattr(self.scene, 'last_error', None) or 'no answer'}")
+                    self.say(f"SCENE look ({tag}) unavailable: {error or getattr(self.scene, 'last_error', None) or 'no answer'}")
                 else:
                     self.latencies.append(report.latency_s or (time.perf_counter() - started))
                     self.say(
@@ -265,6 +264,29 @@ class SceneWorker:
             finally:
                 with self._lock:
                     self._pending -= 1
+
+    def _look(self, frame: np.ndarray, now: float) -> tuple[Report | None, str | None]:
+        """One look on a thread of its own, given up after deadline_s.
+
+        The scene's own timeout covers its sockets, but a call stuck before that (a name
+        lookup, a flapping link) would otherwise hold the one in-flight slot for good and no
+        later look could ever be asked, which is what stalled the scene check on 21 Oct.
+        A look that raises counts as unavailable too, so this worker never dies.
+        """
+        box: dict = {}
+
+        def call() -> None:
+            try:
+                box["report"] = self.scene.look(frame, now) if isinstance(self.scene, ScriptedScene) else self.scene.look(frame)
+            except Exception as err:
+                box["error"] = f"{type(err).__name__}: {err}"[:200]
+
+        thread = threading.Thread(target=call, name="scene-look-call", daemon=True)
+        thread.start()
+        thread.join(self.deadline_s)
+        if thread.is_alive():
+            return None, f"no answer within {self.deadline_s:g}s; the look was given up"
+        return box.get("report"), box.get("error")
 
     def stop(self) -> None:
         try:

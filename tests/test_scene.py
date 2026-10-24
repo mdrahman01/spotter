@@ -4,6 +4,7 @@ branch of the departure (use 1) and unreadable-vehicle (use 2) logic."""
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -337,3 +338,89 @@ class RuleHoldTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StuckLookTest(unittest.TestCase):
+    """Film day, Oct 21: one look never came back (the link was flapping and the call was stuck before
+    its socket timeout could fire), and with the one in-flight slot held, no further look was asked
+    for six minutes while frames flowed. The worker must give such a look up and carry on."""
+
+    class HangingScene:
+        timeout_s = 0.2  # the socket timeout the worker's deadline is derived from
+        last_error = None
+
+        def __init__(self):
+            self.release = threading.Event()
+            self.calls = 0
+
+        def look(self, frame):
+            self.calls += 1
+            if self.calls == 1:
+                self.release.wait(10)  # the first look hangs, as a name lookup with no timeout would
+                return None
+            return empty()
+
+    @staticmethod
+    def wait_until(condition, seconds=3.0):
+        deadline = time.time() + seconds
+        while not condition() and time.time() < deadline:
+            time.sleep(0.01)
+        return condition()
+
+    def test_a_look_that_never_answers_is_given_up_and_the_next_look_is_served(self):
+        scene = self.HangingScene()
+        said = []
+        worker = SceneWorker(scene, say=said.append)
+        try:
+            self.assertTrue(worker.request(FRAME, 0.0, "idle"))
+            self.assertTrue(self.wait_until(lambda: not worker.pending), "the stuck look still holds the in-flight slot")
+            looks = worker.results()
+            self.assertEqual((len(looks), looks[0].report), (1, None))
+            self.assertIn("given up", said[-1])
+            self.assertEqual((worker.looks, worker.unavailable), (1, 1))
+            self.assertTrue(worker.request(FRAME, 20.0, "idle"))  # the next look goes through
+            self.assertTrue(self.wait_until(lambda: not worker.pending))
+            looks = worker.results()
+            self.assertEqual((len(looks), looks[0].report.vehicle_in_driveway), (1, False))
+        finally:
+            scene.release.set()
+            worker.stop()
+
+    def test_a_look_that_raises_counts_as_unavailable_and_the_worker_lives_on(self):
+        class RaisingScene:
+            timeout_s = 1.0
+            calls = 0
+
+            def look(self, frame):
+                RaisingScene.calls += 1
+                if RaisingScene.calls == 1:
+                    raise RuntimeError("could not encode the frame")
+                return empty()
+
+        said = []
+        worker = SceneWorker(RaisingScene(), say=said.append)
+        try:
+            self.assertTrue(worker.request(FRAME, 0.0, "idle"))
+            self.assertTrue(self.wait_until(lambda: not worker.pending))
+            self.assertTrue(said and "RuntimeError: could not encode the frame" in said[-1], said)
+            self.assertTrue(worker.request(FRAME, 20.0, "idle"))
+            self.assertTrue(self.wait_until(lambda: not worker.pending))
+            self.assertEqual(worker.results()[-1].report.vehicle_in_driveway, False)
+        finally:
+            worker.stop()
+
+    def test_idle_looks_resume_after_a_stuck_look_while_frames_flow(self):
+        scene = self.HangingScene()
+        worker = SceneWorker(scene, say=quiet)
+        watch = SceneWatch(worker, ArriveLeaveRule(5, 3, 30), SceneSettings(idle_every_s=15), say=quiet)
+        try:
+            now = 0.0
+            deadline = time.time() + 3
+            while worker.looks < 2 and time.time() < deadline:
+                watch.tick(now, FRAME, set(), {})  # frames keep flowing, so watched time keeps advancing
+                now += 0.2
+                time.sleep(0.005)
+            self.assertGreaterEqual(worker.looks, 2, "no second look while frames flowed")
+        finally:
+            scene.release.set()
+            worker.stop()
