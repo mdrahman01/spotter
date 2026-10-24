@@ -92,12 +92,12 @@ CLIPS = {
     # The rehearsal clip, 30.4 s long; the car is read from about 5.8 s to 22.2 s.
     "IMG_2472.mov": Clip(zone="0.35,0.27,0.69,0.69", leave_after_s=4, booking_ends_after_s=12,
                          ending_soon_s=4, overstay_grace_s=3),
-    # The demo clip, filmed later with a prop plate. The zone stays None until it is measured with
-    #     .venv/bin/python -m spotter.calibrate --source samples/demo.mp4 --expect PLATE
-    # then the proposed zone goes here, or is passed with --zone. The timings are IMG_2472.mov's
-    # until the clip is measured. Choose them so the booking ends a few seconds after the car has
-    # parked and well before it leaves: then ENDING_SOON and OVERSTAY both happen with the car in the spot.
-    "demo.mp4": Clip(zone=None, leave_after_s=4, booking_ends_after_s=12, ending_soon_s=4, overstay_grace_s=3),
+    # The demo clip, 153.6 s at 5 fps, filmed on 24 Oct 2026 with the prop plate RENT 743 (the frames the
+    # live run checked, cut from ten seconds before the car enters the zone to the departure). The plate is
+    # read from 10.2 s to 139.0 s, 83 to 163 px wide; the zone is the one the live run used that day. The
+    # booking ends at 60 s, so ENDING_SOON comes at 30 s and OVERSTAY at 90 s with the car in the spot, and
+    # LEFT about 10 s after the last read, before the clip ends.
+    "demo.mp4": Clip(zone="0.40,0.53,0.78,0.80", leave_after_s=10, booking_ends_after_s=60, ending_soon_s=30, overstay_grace_s=30),
 }
 
 

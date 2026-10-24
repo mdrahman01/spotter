@@ -74,7 +74,9 @@ class DefaultClipTest(unittest.TestCase):
 class ClipTableTest(unittest.TestCase):
     def test_the_table_lists_the_rehearsal_and_demo_clips(self):
         self.assertEqual(set(scenario.CLIPS), {"IMG_2472.mov", "demo.mp4"})
-        self.assertIsNone(scenario.CLIPS["demo.mp4"].zone)  # measured after filming
+        demo = scenario.CLIPS["demo.mp4"]  # filmed and measured on 24 Oct 2026
+        self.assertEqual(demo.zone, "0.40,0.53,0.78,0.80")
+        self.assertEqual((demo.leave_after_s, demo.booking_ends_after_s, demo.ending_soon_s, demo.overstay_grace_s), (10, 60, 30, 30))
 
     def test_the_rehearsal_clip_row(self):
         clip = scenario.clip_settings(CLIP)
@@ -91,16 +93,13 @@ class ClipTableTest(unittest.TestCase):
         self.assertEqual(clip.booking_ends_after_s, 20.0)
         self.assertEqual((clip.ending_soon_s, clip.overstay_grace_s), (4, 3))  # untouched
 
-    def test_the_demo_clip_needs_a_zone_until_it_is_measured(self):
-        with self.assertRaises(ValueError) as caught:
-            scenario.clip_settings(DEMO)
-        message = str(caught.exception)
-        self.assertIn(f"{DEMO} has no zone in the CLIPS table yet", message)
-        self.assertIn(f"python -m spotter.calibrate --source {DEMO} --expect PLATE", message)
-        self.assertIn("--zone", message)
+    def test_the_demo_clip_row_is_measured_and_a_flag_still_overrides_its_zone(self):
+        clip = scenario.clip_settings(DEMO)
+        self.assertEqual(clip.zone, "0.40,0.53,0.78,0.80")
+        self.assertEqual((clip.leave_after_s, clip.booking_ends_after_s, clip.ending_soon_s, clip.overstay_grace_s), (10, 60, 30, 30))
         clip = scenario.clip_settings(DEMO, zone="0.2,0.2,0.8,0.8")
         self.assertEqual(clip.zone, "0.2,0.2,0.8,0.8")
-        self.assertEqual((clip.leave_after_s, clip.booking_ends_after_s), (4, 12))  # IMG_2472.mov's until measured
+        self.assertEqual((clip.leave_after_s, clip.booking_ends_after_s), (10, 60))
 
     def test_an_unknown_clip_needs_a_zone_and_the_error_names_calibrate(self):
         with self.assertRaises(ValueError) as caught:

@@ -241,10 +241,10 @@ does not carry the price the decision returned.
 | Command | Needs |
 | --- | --- |
 | `.venv/bin/python -m unittest discover -s tests` | nothing: 210 tests, no network |
-| `.venv/bin/python scripts/scenario.py overstay --expect RENT743` | a Token Factory key and `samples/demo.mp4` (see below) |
-| `.venv/bin/python scripts/scenario.py booked --expect RENT743` | a Token Factory key and `samples/demo.mp4` (see below) |
-| `.venv/bin/python scripts/scenario.py unknown --expect RENT743` | a Token Factory key and `samples/demo.mp4` (see below) |
-| `.venv/bin/python scripts/scenario.py dispute --case a --expect RENT743` | a Token Factory key and `samples/demo.mp4` (see below) |
+| `.venv/bin/python scripts/scenario.py overstay --expect RENT743` | a Token Factory key |
+| `.venv/bin/python scripts/scenario.py booked --expect RENT743` | a Token Factory key |
+| `.venv/bin/python scripts/scenario.py unknown --expect RENT743` | a Token Factory key |
+| `.venv/bin/python scripts/scenario.py dispute --case a --expect RENT743` | a Token Factory key |
 | `.venv/bin/python -m spotter.price --alerts console` | a Token Factory key, a Tavily key, `SPOTTER_LOT_AREA` |
 
 The replay scenarios play the clip `samples/demo.mp4` through the whole
@@ -259,9 +259,12 @@ goodwill rule on (waived to $1.00), c asks the attendant to ignore its rules
 the plate to expect; a plate seen by the camera that is not the expected one
 prints as OTHER.
 
-`samples/demo.mp4` is being filmed and will be added to the repository. The
-harness takes any clip with `--clip PATH`, with its zone from a small table in
-`scripts/scenario.py` or from `--zone`; the zone for a new clip comes from
+`samples/demo.mp4` is in the repository: 2 minutes 34 seconds of the frames
+the live run checked on 24 October 2026, at full resolution and five frames a
+second, from ten seconds before the car enters the zone to the departure, with
+the prop plate RENT 743 on the car and no other plate readable anywhere in it.
+The harness takes any clip with `--clip PATH`, with its zone from a small table
+in `scripts/scenario.py` or from `--zone`; the zone for a new clip comes from
 `.venv/bin/python -m spotter.calibrate --source CLIP --expect PLATE`. The
 price check runs a real search for real events near the lot tonight.
 
