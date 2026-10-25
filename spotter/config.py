@@ -111,6 +111,7 @@ class Settings:
     rate_peak: int = field(default=1200, metadata={"help": "the hourly price on a peak night, in dollars"})
     lot_area: str = field(default="", metadata={"help": "where the lot is, for the event search (never printed)"})
     event_radius_miles: float = field(default=5, metadata={"help": "events within this many miles count"})
+    nearby_venues: str = field(default="", metadata={"help": "venues inside the radius, comma-separated, that code searches for today before the judge's first turn (at most four are used)"})
     price_check_at: str = field(default="", metadata={"help": "local time HH:MM of the daily price check (empty: none)"})
     price_model: str = field(default="nvidia/Nemotron-3-Ultra-550b-a55b", metadata={"help": "the model that decides tonight's price: Nemotron 3 Ultra, the careful judge; SPOTTER_PRICE_MODEL still switches it (Lightning followed the tool rules better, but a money decision wants the careful judge)"})
     dashboard: bool = field(default=False, metadata={"help": "serve the owner's page at http://localhost:<dashboard_port> (on/off)"})
@@ -219,6 +220,7 @@ PARSERS: dict[str, Callable[[str], object]] = {
     "rate_peak": parse_dollars,
     "lot_area": str,
     "event_radius_miles": float,
+    "nearby_venues": str,
     "price_check_at": str,
     "price_model": str,
     "dashboard": parse_bool,

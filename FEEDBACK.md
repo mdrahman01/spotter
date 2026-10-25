@@ -849,3 +849,29 @@ down (the first was stopped while it was down); the run now writes
 RUN_STARTED and RUN_STOPPED rows, the timeline shows them with a dash in the
 Finished column, and a stop signal ends a run the way Ctrl-C does, so the
 closing row gets written.
+
+## 2026-10-25 — The price judge misses a stadium game: a venue pre-search by code
+
+**What happened.** On Sunday 25 October the Jets played the Dolphins at
+MetLife Stadium at 1:00 pm, 9.5 miles from the lot's area with the radius set
+to 10 miles, so the owner's policy says peak. A live "/price" at 10:58 am on
+Nemotron 3 Ultra ran three searches: the town's events for today, the
+Prudential Center for today, and the distance from Newark to the town. It
+found a Journey concert at the Prudential Center, judged it 15 to 16 miles
+away (right: 12.0 by the map, outside the radius either way), never named
+MetLife Stadium, and kept the base price. The decision was clean by the tool
+rules and wrong by the policy: the searches were town-centric, and a stadium
+nine miles out does not come up in a query about the town.
+
+**The fix, in code rather than in the guide.** A new setting,
+SPOTTER_NEARBY_VENUES, lists the stadiums, arenas and concert venues inside
+the owner's radius. Before the judge's first turn, code runs one Tavily search
+per listed venue for today's date (at most four venues), outside the judge's
+own three-search allowance, and hands the results to the judge in its first
+message as results it already has; their urls count for set_demand like the
+judge's own. Each result is capped at 400 characters as before, the judge
+keeps its three searches for the area, and nothing in the policy or the money
+changed. Seven tests cover the parsing, the cap, the pre-search, a decision
+that cites a venue link, a failed venue search and the no-venue case. The
+lesson for the model: a judge that reasons well still only sees what its
+queries return, and the owner knows the venues; code should ask about them.

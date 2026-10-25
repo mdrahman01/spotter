@@ -168,6 +168,8 @@ def main() -> int:
             if tool == "model":
                 model_problems.append((kind, result.get("error")))
                 continue
+            if tool == "venue_search":  # the price check's own searches, run by code before the judge
+                continue
             if tool == "photo":
                 if not result.get("delivered"):
                     notes.append(f"{kind}: photos for the {arguments.get('to')} not delivered: {result.get('error')}")

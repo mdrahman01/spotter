@@ -139,12 +139,17 @@ none wrong. That is what lets Spotter confirm a departure in 12 s instead of
 identify. The endpoint takes about ten minutes to load and is deleted after
 every session; rehearsal day's 52 minutes cost about $1.39.
 
-**[Tavily](https://tavily.com/) is the web search behind tonight's price.** The price judge may run
-three basic searches (six results each, one credit a search) for events near
-the lot tonight, then must decide by tool call: base, busy or peak, with a link
-from this check's results for anything above base. Ten checks used 26
-searches. Code insists on the link and refuses a message to the owner that
-does not carry the price the decision returned.
+**[Tavily](https://tavily.com/) is the web search behind tonight's price.** Before
+the judge's first turn, code runs one basic search per venue the owner lists in
+`SPOTTER_NEARBY_VENUES` (the stadiums, arenas and concert venues inside the
+radius, at most four) for today's date and hands those results to the judge.
+The judge may then run three searches of its own (six results each, one credit
+a search) for events near the lot tonight, and must decide by tool call: base,
+busy or peak, with a link from this check's results for anything above base.
+The venue list exists because on 25 October a town-centric check found a
+concert 15 miles away and missed an NFL game 9.5 miles away. Ten earlier
+checks used 26 searches. Code insists on the link and refuses a message to the
+owner that does not carry the price the decision returned.
 
 ## The rules a judge should know
 
@@ -231,8 +236,11 @@ does not carry the price the decision returned.
    endpoints remain. The L40S preset costs
    $1.59 an hour, loaded or not.
 10. **Tonight's price (optional).** Put a Tavily key in `TAVILY_API_KEY`, the
-    lot's town in `SPOTTER_LOT_AREA`, and the three hourly prices in
-    `SPOTTER_RATE_BASE`, `SPOTTER_RATE_BUSY` and `SPOTTER_RATE_PEAK`. Run
+    lot's town in `SPOTTER_LOT_AREA`, the radius in `SPOTTER_EVENT_RADIUS_MILES`,
+    the stadiums, arenas and concert venues inside that radius in
+    `SPOTTER_NEARBY_VENUES` (comma-separated, at most four are searched), and
+    the three hourly prices in `SPOTTER_RATE_BASE`, `SPOTTER_RATE_BUSY` and
+    `SPOTTER_RATE_PEAK`. Run
     `.venv/bin/python -m spotter.price`, text `/price` to the bot, or set
     `SPOTTER_PRICE_CHECK_AT=17:00` for a daily check.
 

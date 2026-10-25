@@ -11,7 +11,7 @@ from unittest.mock import patch
 from spotter import config
 from spotter.alerts import ConsoleAlerts
 from spotter.db import Database
-from spotter.price import AFTER_REMINDER, BY_CODE, CLEAN, MAX_SEARCHES, PRICE_MODEL, PRICE_PROMPT, PriceAgent, PriceToolbox, TavilySearch, make_price_agent, price_until
+from spotter.price import AFTER_REMINDER, BY_CODE, CLEAN, MAX_SEARCHES, MAX_VENUES, PRICE_MODEL, PRICE_PROMPT, PriceAgent, PriceToolbox, TavilySearch, make_price_agent, price_until, venue_list
 from spotter.privacy import Masker
 from spotter.seed import tonight_rate
 from spotter.words import WordBook
@@ -291,3 +291,71 @@ class ModelChoiceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VenueSearchTest(unittest.TestCase):
+    """SPOTTER_NEARBY_VENUES: code searches each listed venue for today before the judge's first turn.
+    On 25 Oct 2026 a town-centric check found a concert 15 miles away and missed an NFL game 9.5 miles away."""
+
+    ENV = {"SPOTTER_LOT_AREA": "Elm Street, Springfield",
+           "SPOTTER_NEARBY_VENUES": " Big Stadium, Old Arena ,, big stadium, The Music Hall, Fifth Place, Sixth Place "}
+    VENUES = ["Big Stadium", "Old Arena", "The Music Hall", "Fifth Place"]
+
+    def test_the_setting_parses_to_at_most_four_distinct_venues(self):
+        self.assertEqual(MAX_VENUES, 4)
+        self.assertEqual(venue_list(config.load({}, env=self.ENV)), self.VENUES)
+        self.assertEqual(venue_list(config.load({}, env={"SPOTTER_LOT_AREA": "x"})), [])
+        self.assertEqual(config.load({}, env={}).nearby_venues, "")
+
+    def test_code_searches_each_venue_first_and_hands_the_results_to_the_judge(self):
+        scene = Scene([[SEARCH], [BASE], [owner("Tonight's price stays at $5.00 an hour (base): nothing within the radius.")], "Done."], env=self.ENV)
+        self.assertEqual(scene.agent.handle(NOW), CLEAN)
+        self.assertEqual(scene.tavily.queries[:4], [f"{v} events October 13 2026" for v in self.VENUES])  # today, local date
+        self.assertEqual(scene.tavily.queries[4:], ["events tonight near the lot"])  # the judge's own search came after
+        first = json.loads(scene.model.requests[0]["messages"][1]["content"])
+        self.assertEqual([v["venue"] for v in first["venue_results"]], self.VENUES)
+        self.assertEqual(first["venue_results"][0]["results"][0]["url"], "https://example.com/arena")
+        self.assertEqual(first["venue_results"][0]["query"], "Big Stadium events October 13 2026")
+        toolbox = scene.agent.last_toolbox
+        self.assertEqual([v for v, _, n in toolbox.venue_searches], self.VENUES)
+        self.assertEqual(len(toolbox.searches), 1)  # the judge's allowance is untouched
+        rows = scene.rows("venue_search")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(json.loads(rows[0]["arguments"])["by"], "code")
+        self.assertEqual(scene.agent.stats.searches, 5)  # every Tavily call is counted for the credits line
+        finish = json.loads(scene.rows("finish")[0]["result"])
+        self.assertEqual(len(finish["venue_searches"]), 4)
+
+    def test_the_judge_keeps_its_three_searches_after_the_venue_searches(self):
+        scene = Scene([[SEARCH], [SEARCH], [SEARCH], [BASE], [owner("Tonight's price stays at $5.00 an hour (base): nothing on.")], "Done."], env=self.ENV)
+        self.assertEqual(scene.agent.handle(NOW), CLEAN)
+        self.assertEqual(scene.agent.stats.tool_errors, 0)  # the third search was not refused
+        self.assertEqual(len(scene.agent.last_toolbox.searches), 3)
+        self.assertEqual(len(scene.tavily.queries), 7)
+
+    def test_a_decision_may_cite_a_link_that_only_a_venue_search_returned(self):
+        scene = Scene([[PEAK], [owner("Tonight's price is $12.00 an hour (peak) until 6:00 am: Concert at Big Arena, doors 7 pm. Source: https://example.com/arena")], "Done."], env=self.ENV)
+        self.assertEqual(scene.agent.handle(NOW), CLEAN)
+        self.assertEqual(scene.db.tonight_price(NOW)["level"], "peak")
+        self.assertEqual(len(scene.tavily.queries), 4)  # the judge searched nothing itself
+
+    def test_a_failed_venue_search_is_noted_and_the_check_goes_on(self):
+        scene = Scene([[BASE], [owner("Tonight's price stays at $5.00 an hour (base): nothing on.")], "Done."], fail=True, env=self.ENV)
+        self.assertEqual(scene.agent.handle(NOW), CLEAN)
+        rows = scene.rows("venue_search")
+        self.assertEqual(len(rows), 4)
+        self.assertIn("the search failed", json.loads(rows[0]["result"])["error"])
+        self.assertNotIn("tvly-secret", json.dumps([dict(r) for r in rows]))
+        first = json.loads(scene.model.requests[0]["messages"][1]["content"])
+        self.assertNotIn("venue_results", first)
+
+    def test_without_the_setting_nothing_changes(self):
+        scene = Scene([[SEARCH], [BASE], [owner("Tonight's price stays at $5.00 an hour (base): nothing on.")], "Done."])
+        self.assertEqual(scene.agent.handle(NOW), CLEAN)
+        self.assertEqual(scene.tavily.queries, ["events tonight near the lot"])
+        self.assertNotIn("venue_results", json.loads(scene.model.requests[0]["messages"][1]["content"]))
+        self.assertEqual(scene.rows("venue_search"), [])
+
+    def test_the_guide_tells_the_judge_what_venue_results_are(self):
+        self.assertIn("venue_results", PRICE_PROMPT)
+        self.assertIn("their urls count for set_demand", PRICE_PROMPT)
