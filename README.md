@@ -11,11 +11,11 @@ does that for one driveway with an ordinary home camera, a smart bulb, and
 models from NVIDIA served on Nebius. Code owns the money and the rules; the models decide
 what to do and what to say.
 
-![The owner's dashboard after the first scene on film day: the booked car's arrival and departure on the timeline, the $1.00 minimum billed, the scene check agreeing that the spot is empty](docs/images/arrival.png)
+![The owner's dashboard as a booked car arrives: green light, the stay open, the scene check agreeing](docs/images/arrival.png)
 
 **Demo video:** [youtu.be/VI1SiGadLDo](https://youtu.be/VI1SiGadLDo), three
 minutes from film day, 24 October 2026. The screenshots on this page are from
-film day too.
+rehearsal day, 16 October 2026.
 
 **No hardware, no keys?** `.venv/bin/python -m unittest discover -s tests` runs
 220 tests in a few seconds; see [Try it without hardware](#try-it-without-hardware).
@@ -293,11 +293,11 @@ price check runs a real search for real events near the lot tonight.
 
 ## Screenshots
 
-The first is at the top of this page. Two more from film day, 24 October 2026:
+The arrival is at the top of this page. Two more from rehearsal day:
 
-![The overstay on the timeline: ending soon at 3:01 pm, the fee at 3:03 pm, the car gone at 3:04 pm, the stay billed $6.00](docs/images/overstay_fee.png)
+![The overstay: amber light, the fee on the stay card, the day's timeline](docs/images/overstay_fee.png)
 
-![The two disputes on the timeline, both finished clean: the fee kept, then waived under the owner's rule, with $5.00 of fees waived in the day's totals](docs/images/dispute.png)
+![A dispute answered from the record: the stay record the judge read, the reply with photos, the owner's note](docs/images/dispute.png)
 
 ## Repository layout
 
