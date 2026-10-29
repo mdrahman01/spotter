@@ -11,13 +11,14 @@ does that for one driveway with an ordinary home camera, a smart bulb, and
 models from NVIDIA served on Nebius. Code owns the money and the rules; the models decide
 what to do and what to say.
 
-![The owner's dashboard as a booked car arrives: green light, the stay open, the scene check agreeing](docs/images/arrival.png)
+![The owner's dashboard after the first scene on film day: the booked car's arrival and departure on the timeline, the $1.00 minimum billed, the scene check agreeing that the spot is empty](docs/images/arrival.png)
 
-**Demo video:** _not yet filmed; the link goes here._ The screenshots on this
-page are from rehearsal day.
+**Demo video:** [youtu.be/VI1SiGadLDo](https://youtu.be/VI1SiGadLDo), three
+minutes from film day, 24 October 2026. The screenshots on this page are from
+film day too.
 
 **No hardware, no keys?** `.venv/bin/python -m unittest discover -s tests` runs
-210 tests in a few seconds; see [Try it without hardware](#try-it-without-hardware).
+220 tests in a few seconds; see [Try it without hardware](#try-it-without-hardware).
 
 ## What it does
 
@@ -60,6 +61,20 @@ The timings are from that evening's logs.
 Every one of the 17 live events that evening finished clean: the attendant
 took every required step itself, with no reminder and nothing completed by
 code.
+
+On film day, 24 October 2026, the seven scenes were run again in daylight for
+the video, with the scene check on throughout. The attendant handled 12 events:
+10 finished clean and 2 after a reminder, both because the bulb's first command
+timed out and the finish check asked for the light once more; none was completed
+by code. Nemotron 3.5 Lightning made 50 calls at 0.72 s on average, with no
+reasoning tokens. Cosmos Reason made 197 looks at a median of 2.1 s; seven got
+no answer and were marked unavailable, and none of them stalled the looks after
+it, which is what commit 34b6d4c fixed. The next morning, Sunday 25 October, the
+price check kept the base price because the judge's own searches, phrased around
+the town, found only a concert outside the radius; after commit eccc816, which
+has code search the owner's listed venues before the judge's first turn, the
+same check found the Jets game at MetLife Stadium, 9.5 miles from the lot, and
+set the peak price with the stadium's page as its link.
 
 ## How it works
 
@@ -248,7 +263,7 @@ owner that does not carry the price the decision returned.
 
 | Command | Needs |
 | --- | --- |
-| `.venv/bin/python -m unittest discover -s tests` | nothing: 210 tests, no network |
+| `.venv/bin/python -m unittest discover -s tests` | nothing: 220 tests, no network |
 | `.venv/bin/python scripts/scenario.py overstay --expect RENT743` | a Token Factory key |
 | `.venv/bin/python scripts/scenario.py booked --expect RENT743` | a Token Factory key |
 | `.venv/bin/python scripts/scenario.py unknown --expect RENT743` | a Token Factory key |
@@ -278,11 +293,11 @@ price check runs a real search for real events near the lot tonight.
 
 ## Screenshots
 
-The arrival is at the top of this page. Two more from rehearsal day:
+The first is at the top of this page. Two more from film day, 24 October 2026:
 
-![The overstay: amber light, the fee on the stay card, the day's timeline](docs/images/overstay_fee.png)
+![The overstay on the timeline: ending soon at 3:01 pm, the fee at 3:03 pm, the car gone at 3:04 pm, the stay billed $6.00](docs/images/overstay_fee.png)
 
-![A dispute answered from the record: the stay record the judge read, the reply with photos, the owner's note](docs/images/dispute.png)
+![The two disputes on the timeline, both finished clean: the fee kept, then waived under the owner's rule, with $5.00 of fees waived in the day's totals](docs/images/dispute.png)
 
 ## Repository layout
 
@@ -324,7 +339,7 @@ scripts/
   prop_plates.py     the two prop plates as a PDF
   read_plate.py      the first plate-reader probe on photos
   check_secrets.py, install_hooks.sh   the pre-commit secret check
-tests/        210 unit tests, no network
+tests/        220 unit tests, no network
 props/        prop_plates.pdf
 docs/images/  the screenshots above
 FEEDBACK.md   dated notes on the Nebius and NVIDIA tools, with a summary at the top
