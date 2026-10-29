@@ -227,9 +227,17 @@ Nebius itself.
 
 ### Onboarding, in Moe's words
 
-_To be written by Moe._
-
-<!-- Moe: your own account of the first day, in plain sentences. Signing up for Nebius, finding your way around the console, making the first API key and putting it in .env, and bringing up the first Serverless AI endpoint. Say what was quick, what you had to look up, and how long each step took if you remember. Do not paste any key, token, camera address or lot area. -->
+Signing up for Nebius took a few minutes with a card. The first thing that went
+wrong was billing: the console answered "already has a customer" and would not
+go further (Request ID c710b4ae-5993-45cf-a17b-b341583f9de6, Trace ID
+7254118428e96fc110caaa94f46e6798). I filled in the Builders Program form for
+credits and asked questions in the Discord that went unanswered. The Token
+Factory key was the easy part: one page, one click, into .env, and the first
+tool call worked within a quarter of an hour. The gated Cosmos Reason model on
+Hugging Face cost an afternoon: the first endpoint reached RUNNING and died on
+the access gate, and I had to request access and wait before the second try
+loaded. The API side was quick; the account side, the billing error, the credits
+form and the unanswered Discord, is where a newcomer loses the time.
 
 ## 2026-10-03 — Week 1: Nemotron hello and tool-calling test
 
